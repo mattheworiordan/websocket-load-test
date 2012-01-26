@@ -1,16 +1,14 @@
 var sys = require('sys');
-var ws = require("websocket-server");
+var ws = require("ws").Server;
 
-var server = ws.createServer();
+var server = new ws({ port: 8000 });
 
-server.addListener("connection", function(connection){
-  connection.addListener("message", function(msg){
+server.on("connection", function(connection) {
+  connection.on("message", function(msg){
     sys.debug('message received: ' + msg);
     connection.send('message echo');
   });
 });
-
-server.listen(8000);
 
 var http = require('http');
 http.createServer(function (req, res) {

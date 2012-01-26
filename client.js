@@ -1,20 +1,20 @@
 var sys = require('sys');
-var WebSocket = require('websocket-client').WebSocket;
+var WebSocket = require('ws');
 
+// var ws = new WebSocket('ws://ec2-79-125-102-118.eu-west-1.compute.amazonaws.com:8000/');
+// var ws = new WebSocket('ws://lb.mattheworiordan.com:1340/');
 var ws = new WebSocket('ws://localhost:8000/');
-ws.addListener('data', function(buf) {
-    // sys.debug('Got data: ' + sys.inspect(buf));
+ws.on('open', function() {
+  sys.debug('Connection opened');
+  sendMessage();
 });
-ws.onmessage = function(m) {
-    sys.debug('Got message: ' + m.data);
-}
+ws.on('message', function(data, flags) {
+  sys.debug('Data received: ' + data);
+});
+
 
 function sendMessage() {
-  if (ws.readyState === 1) {
-    ws.send('message');
-  }
-  sys.debug('sent message');
+  ws.send('message');
+  sys.debug('..sent message..');
   setTimeout(sendMessage, 1000);
 }
-
-sendMessage();

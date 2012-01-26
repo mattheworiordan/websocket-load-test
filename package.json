@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "dependencies": {
     "websocket-server": "1.4",
-    "websocket-client": ""
+    "websocket-client": "",
+    "ws": ""
   }
 }
