@@ -2,8 +2,10 @@ var sys = require('sys');
 var WebSocket = require('ws');
 
 // var ws = new WebSocket('ws://ec2-79-125-102-118.eu-west-1.compute.amazonaws.com:8000/');
-// var ws = new WebSocket('ws://lb.mattheworiordan.com:1340/');
-var ws = new WebSocket('ws://localhost:8000/');
+// var ws = new WebSocket('ws://test-1884315901.eu-west-1.elb.amazonaws.com:80/');
+// var ws = new WebSocket('wss://easybacklog.com:443/');
+// var ws = new WebSocket('ws://easybacklog.com:80/');
+var ws = new WebSocket('wss://localhost:8043/');
 ws.on('open', function() {
   sys.debug('Connection opened');
   sendMessage();

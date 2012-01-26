@@ -4,6 +4,7 @@
   "dependencies": {
     "websocket-server": "1.4",
     "websocket-client": "",
-    "ws": ""
+    "ws": "",
+    "http-proxy": ""
   }
 }

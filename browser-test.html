@@ -1,0 +1,17 @@
+<html>
+  <script type="text/javascript">
+    // var websocket = new WebSocket('wss://easybacklog.com:443');
+    // var websocket = new WebSocket('ws://easybacklog.com:80');
+    var websocket = new WebSocket('wss://localhost:8043');
+    websocket.onopen = function(evt) { console.log('Open'); console.log(evt); };
+    websocket.onclose = function(evt) { console.log('Close'); console.log(evt); };
+    websocket.onmessage = function(evt) { console.log('Message'); console.log(evt) };
+    websocket.onerror = function(evt) { console.log('Error'); console.log(evt); };
+    function sendMessage() {
+      websocket.send('message');
+    }
+  </script>
+<body>
+  <a href="javascript:sendMessage();">Send message</a>
+</body>
+</html>
