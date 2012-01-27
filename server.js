@@ -1,32 +1,52 @@
-var sys    = require('sys');
-var ws     = require("ws").Server;
-var fs     = require('fs');
-var server = new ws({ port: 8000 });
+var WebSocketServer     = require("ws").Server,
+    fs                  = require('fs'),
+    cluster             = require('cluster'),
+    numCPUs             = require('os').cpus().length,
+    options             = {
+      key: fs.readFileSync('example.key', 'utf8'),
+      cert: fs.readFileSync('example.crt', 'utf8')
+    };
 
-// add echo behaviour to standard non secure WS
-addEcho(server);
+var setupServer = function(protocol, port, options) {
+  var httpServer = require(protocol).createServer(options);
 
-var http = require('http');
-http.createServer(function (req, res) {
-  res.writeHead(200, {'Content-Type': 'text/plain'});
-  res.end('I\'m alive\n');
-}).listen(8001);
+  httpServer.listen(port);
 
-var options = {
-  key: fs.readFileSync('/Users/matthew/Desktop/ssl/easybacklog.com.nopw.key', 'utf8'),
-  cert: fs.readFileSync('/Users/matthew/Desktop/ssl/easybacklog.com.pem', 'utf8')
-};
-var wss = require('https').createServer(options);
-wss.listen(8003);
-var wssServer = new ws({ server: wss });
-// add echo behaviour to SSL WS
-addEcho(wssServer);
+  // enable http/s server to respond to a simple GET request
+  httpServer.on('request', function (req, res) {
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('I\'m alive (process ' + process.env.NODE_WORKER_ID + ')\n');
+    console.log(' --> ' + protocol.toUpperCase() + ' heartbeat sent');
+  });
 
-function addEcho(server) {
-  server.on("connection", function(connection) {
+  // set up web socket server
+  webSocketServer = new WebSocketServer({ server: httpServer });
+
+  // add echo behaviour to SSL WS
+  webSocketServer.on("connection", function(connection) {
+    console.log("Connection from client opened");
     connection.on("message", function(msg){
-      sys.debug('message received: ' + msg);
+      console.log(' <-- message received and echoed on cluster ' + process.env.NODE_WORKER_ID + ': ' + msg + ' --> ');
       connection.send('message echo');
     });
   });
+};
+
+if (cluster.isMaster) {
+  console.log('Server has ' + numCPUs + ' CPU(s)');
+
+  // Fork workers.
+  for (var i = 0; i < numCPUs; i++) {
+    cluster.fork();
+  }
+
+  cluster.on('death', function(worker) {
+    console.log('!! Worker ' + worker.pid + ' died');
+    cluster.fork();
+    console.log('   .. spawned new worker');
+  });
+} else {
+  console.log('Starting up cluster ID: ' + process.env.NODE_WORKER_ID);
+  setupServer('http', 8000);
+  setupServer('https', 8043, options);
 }
