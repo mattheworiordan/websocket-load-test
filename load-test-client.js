@@ -47,6 +47,7 @@ var openConnection = function() {
     } else {
       var timePassed = new Date().getTime() - startTime,
           rate = totalConnectionRequests / (timePassed / 1000);
+      console.log('Complete report ' + (no_ssl ? 'NOT using SSL' : 'using SSL'));
       console.log(totalConnectionRequests + ' connections in ' + (Math.round(timePassed/100)/10) + ' seconds.  Rate of ' + (Math.round(rate*10)/10) + ' connections per second');
       process.exit(0);
     }
