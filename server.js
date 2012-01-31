@@ -1,10 +1,15 @@
+var argv = require('optimist')
+      .alias('k', 'keysize').describe('k', 'key size (1024|2048)').default('k', '')
+      .argv;
+
 var WebSocketServer     = require("ws").Server,
     fs                  = require('fs'),
     cluster             = require('cluster'),
     numCPUs             = require('os').cpus().length,
+    key                 = 'example' + (argv.k ? '-' + argv.k : ''),
     options             = {
-      key: fs.readFileSync('example.key', 'utf8'),
-      cert: fs.readFileSync('example.crt', 'utf8')
+      key: fs.readFileSync(key + '.key', 'utf8'),
+      cert: fs.readFileSync(key + '.crt', 'utf8')
     };
 
 var setupServer = function(protocol, port, options) {
@@ -34,6 +39,7 @@ var setupServer = function(protocol, port, options) {
 
 if (cluster.isMaster) {
   console.log('Server has ' + numCPUs + ' CPU(s)');
+  console.log('Using key ' + key);
 
   // Fork workers.
   for (var i = 0; i < numCPUs; i++) {
