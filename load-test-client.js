@@ -183,6 +183,7 @@ dns.resolve4(host, function (err, addresses) {
   if (err) {
     console.log("Warning, could not resolve DNS for " + host);
     hostResolved = host;
+    hostResolvedUsed[hostResolved] = true;
   } else {
     console.log("Resolved DNS for " + host + " to " + addresses.join(', '));
     hostResolved = addresses[Math.floor(Math.random()*addresses.length)];
