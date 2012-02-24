@@ -3,14 +3,14 @@
 /**********************************
  * Usage
  *
- * load-test-client.js -c|--connections=<count> -n|--number=<count> -h|--host=<host> -port|--p=<port> -t|--ramp_up_time=<time in seconds> -s|--no_ssl (disable SSL) -d|--duration=<time in seconds> -r|--rate=<max messages per second>
+ * load-test-client.js -c|--concurrent=<count> -n|--number=<count> -h|--host=<host> -port|--p=<port> -t|--ramp_up_time=<time in seconds> -s|--no_ssl (disable SSL) -d|--duration=<time in seconds> -r|--rate=<max messages per second>
  **********************************/
 
 var webSocket = require('ws');
 
 var argv = require('optimist')
-      .usage('Usage: load-test-client.js -c|--connections=<count> -n|--number=<count> -h|--host=<host> -port|--p=<port> -t|--ramp_up_time=<time in seconds> -s|--no_ssl (disable SSL) -d|--duration=<time in seconds> -r|--rate=<max messages per second>')
-      .alias('c', 'connections').describe('c', 'number of concurrent connections').default('c', 100)
+      .usage('Usage: load-test-client.js -c|--concurrent=<count> -n|--number=<count> -h|--host=<host> -port|--p=<port> -t|--ramp_up_time=<time in seconds> -s|--no_ssl (disable SSL) -d|--duration=<time in seconds> -r|--rate=<max messages per second>')
+      .alias('c', 'concurrent').describe('c', 'number of concurrent connections').default('c', 100)
       .alias('n', 'number').describe('r', 'number of connection requests (used unless --duration specified)').default('n', 1000)
       .alias('d', 'duration').describe('d', 'amount of time in seconds to run the tests for (--requests will be ignored)')
       .alias('h', 'host').describe('h', 'the hostname or IP address of the service').default('h', 'localhost')
