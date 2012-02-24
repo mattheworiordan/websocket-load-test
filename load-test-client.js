@@ -7,6 +7,7 @@
  **********************************/
 
 var webSocket = require('ws');
+var dns = require('dns');
 
 var argv = require('optimist')
       .usage('Usage: load-test-client.js -c|--concurrent=<count> -n|--number=<count> -h|--host=<host> -port|--p=<port> -t|--ramp_up_time=<time in seconds> -s|--no_ssl (disable SSL) -d|--duration=<time in seconds> -r|--rate=<max messages per second>')
@@ -29,6 +30,8 @@ if (argv.argv.help) {
 
 /* options */
 var host = argv.h,
+    hostResolved = false,
+    hostResolvedUsed = {},
     port = argv.p,
     connections = argv.c,
     numberRequests = argv.n,
@@ -111,7 +114,7 @@ var host = argv.h,
 
     // open a new connection to the server
     openConnection = function() {
-      var ws = new webSocket((noSsl ? 'ws' : 'wss') + '://' + host + ':' + port + '/');
+      var ws = new webSocket((noSsl ? 'ws' : 'wss') + '://' + hostResolved + ':' + port + '/');
 
       messageRateManager.record();
 
@@ -134,10 +137,16 @@ var host = argv.h,
               } else {
                 if (currentConnections <= 0) {
                   var timePassed = new Date().getTime() - startTime,
-                      averageRate = totalConnectionRequests / (timePassed / 1000);
+                      averageRate = totalConnectionRequests / (timePassed / 1000),
+                      IPs = [],
+                      ip;
                   console.log('\nFinished\n--------');
                   console.log(totalConnectionRequests + ' connections opened over ' + (Math.round(timePassed/100)/10) + ' seconds.  Average rate of ' + (Math.round(averageRate*10)/10) + ' transactions per second.');
                   console.log('Average rate over last minute of ' + (Math.round(messageRateManager.rateOverLastMinute() * 10) / 10) + ' transactions per second.');
+                  for (ip in hostResolvedUsed) {
+                    IPs.push(ip);
+                  }
+                  console.log('IPs used: ' + IPs.join(','));
                   process.exit(0);
                 }
               }
@@ -170,13 +179,38 @@ if (endTime) {
 }
 console.log("Using SSL: " + (noSsl ? 'No' : 'Yes'));
 
-// ramp up the number of connections in one second interval
-for (connIndex = 0; connIndex < connections; connIndex++) {
-  openConnectionInMs = rampUpTime ? Math.floor( (connIndex / connections) * rampUpTime) * 1000: 0;
-  setTimeout(openRateControlledConnectionCallback, openConnectionInMs);
-}
+dns.resolve4(host, function (err, addresses) {
+  if (err) {
+    console.log("Warning, could not resolve DNS for " + host);
+    hostResolved = host;
+  } else {
+    console.log("Resolved DNS for " + host + " to " + addresses.join(', '));
+    hostResolved = addresses[Math.floor(Math.random()*addresses.length)];
+    hostResolvedUsed[hostResolved] = true;
+  }
 
-setInterval(function() {
-  console.log(' - connections open: ' + currentConnections + ', transactions p/s: ' + messageRateManager.rateInLastSecond() + ', total messages: ' + totalConnectionRequests);
-}, 1000);
+  // ramp up the number of connections in one second interval
+  for (connIndex = 0; connIndex < connections; connIndex++) {
+    openConnectionInMs = rampUpTime ? Math.floor( (connIndex / connections) * rampUpTime) * 1000: 0;
+    setTimeout(openRateControlledConnectionCallback, openConnectionInMs);
+  }
+
+  setInterval(function() {
+    console.log(' - connections open: ' + currentConnections + ', transactions p/s: ' + messageRateManager.rateInLastSecond() + ', total messages: ' + totalConnectionRequests);
+  }, 1000);
+
+  // update the DNS every 5 seconds
+  setInterval(function() {
+    dns.resolve4(host, function (err, addresses) {
+      if (!err) {
+        var newHost = addresses[Math.floor(Math.random()*addresses.length)];
+        if (newHost !== hostResolved) {
+          console.log("DNS resolution changed to " + newHost);
+          hostResolved = newHost;
+          hostResolvedUsed[hostResolved] = true;
+        }
+      }
+    });
+  }, 5000);
+});
 
