@@ -21,16 +21,11 @@ var setupServer = function(protocol, port, options) {
 
   httpServer.listen(port);
 
-  httpServer.on('connection', function() {
-    process.send({ connection: 1 });
-  });
-
-    // enable http/s server to respond to a simple GET request
+  // enable http/s server to respond to a simple GET request
   httpServer.on('request', function (req, res) {
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('I\'m alive (process ' + process.env.NODE_WORKER_ID + ')\n');
     process.send({ heartBeatSent: true });
-    process.send({ connection: -1 });
   });
 
   // set up web socket server
@@ -38,6 +33,7 @@ var setupServer = function(protocol, port, options) {
 
   // add echo behaviour to SSL WS
   webSocketServer.on("connection", function(connection) {
+    process.send({ connection: 1 });
     connection.on("message", function(msg){
       connection.send('message echo');
       process.send({ messageSent: true });
