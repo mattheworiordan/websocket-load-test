@@ -13,6 +13,7 @@ var WebSocketServer     = require("ws").Server,
     },
     messagesSent = 0, // keep track of number of messages in the last period
     heartBeatsSent = 0,
+    connections = 0,
     headerShown = false;
 
 var setupServer = function(protocol, port, options) {
@@ -20,11 +21,16 @@ var setupServer = function(protocol, port, options) {
 
   httpServer.listen(port);
 
-  // enable http/s server to respond to a simple GET request
+  httpServer.on('connection', function() {
+    process.send({ connection: 1 });
+  });
+
+    // enable http/s server to respond to a simple GET request
   httpServer.on('request', function (req, res) {
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('I\'m alive (process ' + process.env.NODE_WORKER_ID + ')\n');
     process.send({ heartBeatSent: true });
+    process.send({ connection: -1 });
   });
 
   // set up web socket server
@@ -35,6 +41,9 @@ var setupServer = function(protocol, port, options) {
     connection.on("message", function(msg){
       connection.send('message echo');
       process.send({ messageSent: true });
+    });
+    connection.on('close', function(msg) {
+      process.send({ connection: -1 });
     });
   });
 };
@@ -51,6 +60,8 @@ if (cluster.isMaster) {
         messagesSent++;
       } else if (msg.heartBeatSent) {
         heartBeatsSent++;
+      } else if (msg.connection) {
+        connections += msg.connection;
       }
     });
   }
@@ -62,16 +73,16 @@ if (cluster.isMaster) {
   });
 
 
-  var reportingDuration = 10; // seconds
+  var reportingDuration = 1; // seconds
   setInterval(function() {
     var now = new Date();
     if (messagesSent || heartBeatsSent) {
       if (!headerShown) {
-        console.log('\nHour,Minute,Second,Messages,HeartBeats,MessagesPerSecond,HeartBeatsPerSecond');
+        console.log('\nHour,Minute,Second,Messages,HeartBeats,MessagesPerSecond,HeartBeatsPerSecond,Connections');
         headerShown = true;
       }
       console.log(now.getHours() + ',' + now.getMinutes() + ',' + now.getSeconds() + ',' + messagesSent + ',' + heartBeatsSent + ',' +
-        Math.round(10 * messagesSent/reportingDuration) / 10 + ',' + Math.round(10 * heartBeatsSent/reportingDuration) / 10);
+        Math.round(10 * messagesSent/reportingDuration)/10 + ',' + Math.round(10 * heartBeatsSent/reportingDuration)/10 + ',' + connections);
       messagesSent = 0;
       heartBeatsSent = 0;
     }
