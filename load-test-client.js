@@ -198,7 +198,7 @@ dns.resolve4(host, function (err, addresses) {
 
   setInterval(function() {
     console.log(' - connections open: ' + currentConnections + ', transactions p/s: ' + messageRateManager.rateInLastSecond() + ', total messages: ' + totalConnectionRequests);
-  }, 1000);
+  }, Math.min(duration ? duration / 20 : 20, 20) * 1000); // 20 updates or at least one every 20 seconds
 
   // update the DNS every 5 seconds
   setInterval(function() {
