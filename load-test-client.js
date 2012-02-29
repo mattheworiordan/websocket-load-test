@@ -29,7 +29,9 @@ if (argv.argv.help) {
 }
 
 /* options */
-var host = argv.h,
+var hosts = argv.h.split(','),
+    randomHost = function() { return hosts[Math.floor(Math.random() * hosts.length)]; },
+    lastRandomHost = randomHost(),
     hostResolved = false,
     hostResolvedUsed = {},
     port = argv.p,
@@ -178,7 +180,7 @@ var host = argv.h,
       }
     };
 
-console.log("Starting load testing for host " + host + ":" + port);
+console.log("Starting load testing for host " + hosts.join(',') + ":" + port);
 if (endTime) {
   console.log("Running for " + duration + " seconds");
 } else {
@@ -186,13 +188,13 @@ if (endTime) {
 }
 console.log("Using SSL: " + (noSsl ? 'No' : 'Yes'));
 
-dns.resolve4(host, function (err, addresses) {
+dns.resolve4(lastRandomHost, function (err, addresses) {
   if (err) {
-    console.log("Warning, could not resolve DNS for " + host);
-    hostResolved = host;
+    console.log("Warning, could not resolve DNS for " + lastRandomHost);
+    hostResolved = lastRandomHost;
     hostResolvedUsed[hostResolved] = true;
   } else {
-    console.log("Resolved DNS for " + host + " to " + addresses.join(', '));
+    console.log("Resolved DNS for " + lastRandomHost + " to " + addresses.join(', '));
     hostResolved = addresses[Math.floor(Math.random()*addresses.length)];
     hostResolvedUsed[hostResolved] = true;
   }
@@ -209,16 +211,17 @@ dns.resolve4(host, function (err, addresses) {
 
   // update the DNS every 5 seconds
   setInterval(function() {
-    dns.resolve4(host, function (err, addresses) {
+    lastRandomHost = randomHost();
+    dns.resolve4(lastRandomHost, function (err, addresses) {
       if (!err) {
         var newHost = addresses[Math.floor(Math.random()*addresses.length)];
         if (newHost !== hostResolved) {
-          console.log("DNS resolution changed to " + newHost);
+          console.log("DNS resolution changed to " + newHost + ' for ' + lastRandomHost);
           hostResolved = newHost;
           hostResolvedUsed[hostResolved] = true;
         }
       }
     });
-  }, 5000);
+  }, 3000);
 });
 
