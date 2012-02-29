@@ -69,7 +69,7 @@ if (cluster.isMaster) {
   });
 
 
-  var reportingDuration = 10; // seconds
+  var reportingDuration = 60; // seconds
   setInterval(function() {
     var now = new Date();
     if (messagesSent || heartBeatsSent) {
