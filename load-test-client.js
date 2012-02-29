@@ -40,7 +40,9 @@ var host = argv.h,
     rate = argv.r,
     duration = argv.d,
 
-    currentConnections = 0,
+    concurrentConnections = 0, // actual number of concurrent connections as updated after open/close events
+    attemptedConcurrentConnections = 0, // stores number of concurrent connections before open/close event fired
+
     totalConnectionRequests = 0,
     startTime = new Date().getTime(),
     endTime = duration ? startTime + duration * 1000 : false,
@@ -116,26 +118,31 @@ var host = argv.h,
     openConnection = function() {
       var ws = new webSocket((noSsl ? 'ws' : 'wss') + '://' + hostResolved + ':' + port + '/');
 
+      attemptedConcurrentConnections += 1;
       messageRateManager.record();
 
-      currentConnections += 1;
       // on open connection, lets send a message to the server
       ws.on('open', function() {
+        concurrentConnections += 1;
         totalConnectionRequests += 1;
         ws.send('message');
       });
+      ws.on('close', function() {
+        concurrentConnections -= 1;
+      });
+
       // once we've successfully received a message, close the connection and open a new one if we have not exceeded the rate
       ws.on('message', function(data, flags) {
         var closeAndOpen = function() {
+              attemptedConcurrentConnections -= 1;
               ws.close();
-              currentConnections -= 1;
               // if using time && time has not run out
               // or total requests less than expected requests (minus number of open connections)
               // open another connection
-              if ( (endTime && (endTime > new Date().getTime())) || (!endTime && (totalConnectionRequests < (numberRequests - currentConnections))) ) {
+              if ( (endTime && (endTime > new Date().getTime())) || (!endTime && (totalConnectionRequests < (numberRequests - attemptedConcurrentConnections))) ) {
                 openConnection();
               } else {
-                if (currentConnections <= 0) {
+                if (attemptedConcurrentConnections <= 0) {
                   var timePassed = new Date().getTime() - startTime,
                       averageRate = totalConnectionRequests / (timePassed / 1000),
                       IPs = [],
@@ -197,7 +204,7 @@ dns.resolve4(host, function (err, addresses) {
   }
 
   setInterval(function() {
-    console.log(' - connections open: ' + currentConnections + ', transactions p/s: ' + messageRateManager.rateInLastSecond() + ', total messages: ' + totalConnectionRequests);
+    console.log(' - connections open: ' + concurrentConnections + ', transactions p/s: ' + messageRateManager.rateInLastSecond() + ', total messages: ' + totalConnectionRequests);
   }, Math.min(duration ? duration / 20 : 20, 20) * 1000); // 20 updates or at least one every 20 seconds
 
   // update the DNS every 5 seconds
