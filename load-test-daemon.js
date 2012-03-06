@@ -32,16 +32,20 @@ httpServer.listen(serverPort);
 httpServer.on('request', function (req, res) {
   res.writeHead(200, {'Content-Type': 'text/plain'});
   if (req.url.match(/^\/start/)) {
-    var params = querystring.parse(req.url.replace(/^\/start\?/, ''));
-    if (!params.host) {
-      res.end('Error: Host field is required');
-    } else if (!params.port) {
-      res.end('Error: Port field is required');
+    if (loadTestRunning) {
+      res.end('Load test already running');
     } else {
-      loadTestRunning = true;
-      lastResponse = null;
-      loadTestClient(params.host, params.port, params.concurrent || 100, params.number || 1000, params.ramp_up_time || 0, params.no_ssl, params.rate, params.duration);
-      res.end('Started load test');
+      var params = querystring.parse(req.url.replace(/^\/start\?/, ''));
+      if (!params.host) {
+        res.end('Error: Host field is required');
+      } else if (!params.port) {
+        res.end('Error: Port field is required');
+      } else {
+        loadTestRunning = true;
+        lastResponse = null;
+        loadTestClient(params.host, params.port, params.concurrent || 100, params.number || 1000, params.ramp_up_time || 0, params.no_ssl, params.rate, params.duration);
+        res.end('Started load test');
+      }
     }
   } else if (req.url.match(/^\/report/)) {
     if (lastResponse) {
@@ -180,10 +184,13 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
                     for (ip in hostResolvedUsed) {
                       IPs.push(ip);
                     }
-                    report += '\nIPs used: ' + IPs.join(',');
+                    report += '\nIPs used: ' + IPs.join(',') + '\n\n';
                     lastResponse = report;
                     loadTestRunning = false;
                     console.log(report);
+                    for (var i = 0; i < intervals.length; i++) {
+                      clearInterval(intervals[i]);
+                    }
                   }
                 }
               };
@@ -205,7 +212,9 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
         } else {
           openConnection();
         }
-      };
+      },
+
+      intervals = [];
 
   console.log("Starting load testing for host " + hosts.join(',') + ":" + port);
   if (endTime) {
@@ -232,24 +241,28 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
       setTimeout(openRateControlledConnectionCallback, openConnectionInMs);
     }
 
-    setInterval(function() {
-      console.log(' - connections open: ' + concurrentConnections + ', transactions p/s: ' + messageRateManager.rateInLastSecond() + ', total messages: ' + totalConnectionRequests);
-    }, Math.min(duration ? duration / 20 : 20, 20) * 1000); // 20 updates or at least one every 20 seconds
+    intervals.push(setInterval(function() {
+      if (loadTestRunning) {
+        console.log(' - connections open: ' + concurrentConnections + ', transactions p/s: ' + messageRateManager.rateInLastSecond() + ', total messages: ' + totalConnectionRequests);
+      }
+    }, Math.min(duration ? duration / 20 : 20, 20) * 1000)); // 20 updates or at least one every 20 seconds
 
     // update the DNS every 5 seconds
-    setInterval(function() {
-      lastRandomHost = randomHost();
-      dns.resolve4(lastRandomHost, function (err, addresses) {
-        if (!err) {
-          var newHost = addresses[Math.floor(Math.random()*addresses.length)];
-          if (newHost !== hostResolved) {
-            console.log("DNS resolution changed to " + newHost + ' for ' + lastRandomHost);
-            hostResolved = newHost;
-            hostResolvedUsed[hostResolved] = true;
+    intervals.push(setInterval(function() {
+      if (loadTestRunning) {
+        lastRandomHost = randomHost();
+        dns.resolve4(lastRandomHost, function (err, addresses) {
+          if (!err) {
+            var newHost = addresses[Math.floor(Math.random()*addresses.length)];
+            if (newHost !== hostResolved) {
+              console.log("DNS resolution changed to " + newHost + ' for ' + lastRandomHost);
+              hostResolved = newHost;
+              hostResolvedUsed[hostResolved] = true;
+            }
           }
-        }
-      });
-    }, 3000);
+        });
+      }
+    }, 3000));
   });
 };
 
