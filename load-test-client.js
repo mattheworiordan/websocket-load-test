@@ -17,7 +17,7 @@ var argv = require('optimist')
       .alias('h', 'host').describe('h', 'the hostname or IP address of the service').default('h', 'localhost')
       .alias('p', 'port').describe('p', 'the port of the service').default('p', 8043)
       .alias('t', 'ramp_up_time').describe('t', 'time to take in seconds to ramp up connections').default('t', 0)
-      .alias('s', 'no_ssl').describe('s', 'disable SSL (on by default)')
+      .alias('s', 'no_ssl').describe('s', 'disable SSL (SSL on by default)')
       .alias('r', 'rate').describe('r', 'max rate per second for a transcation (connection opened and message sent)')
       .describe('help', 'show this help')
 
