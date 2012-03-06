@@ -4,6 +4,7 @@
   "dependencies": {
     "ws": "",
     "http-proxy": "",
-    "optimist": ""
+    "optimist": "",
+    "qs": ">=0.3.1"
   }
 }
