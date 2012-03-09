@@ -6,4 +6,4 @@ git pull origin
 
 npm install
 
-node load-test-daemon.js
+/usr/local/bin/node load-test-daemon.js
