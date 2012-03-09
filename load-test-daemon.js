@@ -33,7 +33,7 @@ httpServer.on('request', function (req, res) {
   res.writeHead(200, {'Content-Type': 'text/plain'});
   if (req.url.match(/^\/start/)) {
     if (loadTestRunning) {
-      res.end('Load test already running');
+      res.end('Load test ' + loadTestRunning + ' already running');
     } else {
       var params = querystring.parse(req.url.replace(/^\/start\?/, ''));
       if (!params.host) {
@@ -41,21 +41,21 @@ httpServer.on('request', function (req, res) {
       } else if (!params.port) {
         res.end('Error: Port field is required');
       } else {
-        loadTestRunning = true;
+        loadTestRunning = Math.floor(Math.random()*100000);
         lastResponse = null;
         loadTestClient(params.host, params.port, params.concurrent || 100, params.number || 1000, params.ramp_up_time || 0, params.no_ssl, params.rate, params.duration);
-        res.end('Started load test');
+        res.end('Started load test number ' + loadTestRunning);
       }
     }
   } else if (req.url.match(/^\/report/)) {
     if (lastResponse) {
       res.end(lastResponse);
     } else {
-      res.end('Report not ready yet');
+      res.end('Report for load test ' + loadTestRunning + ' not ready yet');
     }
   } else {
     if (loadTestRunning) {
-      res.end('Load test currently running');
+      res.end('Load test ' + loadTestRunning + ' currently running');
     } else {
       res.end('Ready for next load test');
     }
@@ -179,7 +179,8 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
                         ip,
                         report = '';
                     console.log('\nFinished\n--------');
-                    report += totalConnectionRequests + ' connections opened over ' + (Math.round(timePassed/100)/10) + ' seconds.  Average rate of ' + (Math.round(averageRate*10)/10) + ' transactions per second.';
+                    report += 'Report for load test ' + loadTestRunning + ' complete';
+                    report += '\n' + totalConnectionRequests + ' connections opened over ' + (Math.round(timePassed/100)/10) + ' seconds.  Average rate of ' + (Math.round(averageRate*10)/10) + ' transactions per second.';
                     report += '\nAverage rate over last minute of ' + (Math.round(messageRateManager.rateOverLastMinute() * 10) / 10) + ' transactions per second.';
                     for (ip in hostResolvedUsed) {
                       IPs.push(ip);
