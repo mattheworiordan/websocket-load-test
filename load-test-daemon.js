@@ -266,3 +266,5 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
   });
 };
 
+console.log('Ready and listening on port ' + serverPort);
+
