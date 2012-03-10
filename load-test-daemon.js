@@ -25,7 +25,8 @@ if (argv.argv.help) {
 var serverPort = argv.p,
     httpServer = require('http').createServer(),
     lastResponse = null,
-    loadTestRunning = false;
+    loadTestRunning = false,
+    loadTestErrors = 0;
 httpServer.listen(serverPort);
 
 // enable http server to respond to a simple GET request
@@ -42,6 +43,7 @@ httpServer.on('request', function (req, res) {
         res.end('Error: Port field is required');
       } else {
         loadTestRunning = Math.floor(Math.random()*100000);
+        loadTestErrors = 0;
         lastResponse = null;
         loadTestClient(params.host, params.port, params.concurrent || 100, params.number || 1000, params.ramp_up_time || 0, params.no_ssl, params.rate, params.duration);
         res.end('Started load test number ' + loadTestRunning);
@@ -94,11 +96,11 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
 
       // object to keep track of messages sent in the last second
       messageRateManager = function(rate) {
-        var lastMinuteRateLog = [], // log of messages in the last second to keep track of rate p/s
+        var lastSecondRateLog = [], // log of messages in the last second to keep track of rate p/s
             messageLog = [], // log of all messages sent used for reporting when complete
             queue = [],
             whenRateDrops = function(callback) {
-              var timeUntilNextItemShiftsOff = lastMinuteRateLog[0] - (new Date().getTime() - 1000);
+              var timeUntilNextItemShiftsOff = lastSecondRateLog[0] - (new Date().getTime() - 1000);
               setTimeout(callback, timeUntilNextItemShiftsOff ? timeUntilNextItemShiftsOff+1 : 1);
             },
             processQueue = function() {
@@ -111,15 +113,17 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
             },
             rateInLastSecond = function() {
               // clean up messages older than 1 second
-              while ((lastMinuteRateLog.length > 0) && (lastMinuteRateLog[0] < new Date().getTime() - 1000)) {
-                lastMinuteRateLog.shift();
+              while ((lastSecondRateLog.length > 0) && (lastSecondRateLog[0] < new Date().getTime() - 1000)) {
+                lastSecondRateLog.shift();
               }
-              return lastMinuteRateLog.length;
+              return lastSecondRateLog.length;
             };
 
         return {
-          record: function() {
-            lastMinuteRateLog.push(new Date().getTime());
+          recordAttempt: function() {
+            lastSecondRateLog.push(new Date().getTime());
+          },
+          recordSuccess: function() {
             messageLog.push(new Date().getTime());
           },
           rateInLastSecond: rateInLastSecond,
@@ -144,65 +148,109 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
         };
       }(rate),
 
+      loadTestComplete = function() {
+        var timePassed = new Date().getTime() - startTime,
+            averageRate = totalConnectionRequests / (timePassed / 1000),
+            errorsPerMinute = Math.round(loadTestErrors / ((timePassed / 1000) / 60) * 1000) / 1000,
+            IPs = [],
+            ip,
+            report = '';
+        console.log('\nFinished\n--------');
+        report += 'Report for load test ' + loadTestRunning + ' complete';
+        report += '\n' + totalConnectionRequests + ' connections opened over ' + (Math.round(timePassed/100)/10) + ' seconds.  Average rate of ' + (Math.round(averageRate*10)/10) + ' transactions per second.';
+        report += '\nAverage rate over last minute of ' + (Math.round(messageRateManager.rateOverLastMinute() * 10) / 10) + ' transactions per second.';
+        report += '\nLoad test errors ' + loadTestErrors + ', errors per minute ' + errorsPerMinute;
+        for (ip in hostResolvedUsed) {
+          IPs.push(ip);
+        }
+        report += '\nIPs used: ' + IPs.join(',') + '\n\n';
+        lastResponse = report;
+        loadTestRunning = false;
+        console.log(report);
+        for (var i = 0; i < intervals.length; i++) {
+          clearInterval(intervals[i]);
+        }
+      },
+
       // open a new connection to the server
       openConnection = function() {
-        var ws = new webSocket((noSsl ? 'ws' : 'wss') + '://' + hostResolved + ':' + port + '/');
-
         attemptedConcurrentConnections += 1;
-        messageRateManager.record();
+        messageRateManager.recordAttempt();
 
-        // on open connection, lets send a message to the server
-        ws.on('open', function() {
-          concurrentConnections += 1;
-          totalConnectionRequests += 1;
-          ws.send('message');
-        });
-        ws.on('close', function() {
-          concurrentConnections -= 1;
-        });
-
-        // once we've successfully received a message, close the connection and open a new one if we have not exceeded the rate
-        ws.on('message', function(data, flags) {
-          var closeAndOpen = function() {
-                attemptedConcurrentConnections -= 1;
+        var ws,
+            closeAndOpen = function() {
+              attemptedConcurrentConnections -= 1;
+              try {
                 ws.close();
-                // if using time && time has not run out
-                // or total requests less than expected requests (minus number of open connections)
-                // open another connection
-                if ( (endTime && (endTime > new Date().getTime())) || (!endTime && (totalConnectionRequests < (numberRequests - attemptedConcurrentConnections))) ) {
-                  openConnection();
-                } else {
-                  if (attemptedConcurrentConnections <= 0) {
-                    var timePassed = new Date().getTime() - startTime,
-                        averageRate = totalConnectionRequests / (timePassed / 1000),
-                        IPs = [],
-                        ip,
-                        report = '';
-                    console.log('\nFinished\n--------');
-                    report += 'Report for load test ' + loadTestRunning + ' complete';
-                    report += '\n' + totalConnectionRequests + ' connections opened over ' + (Math.round(timePassed/100)/10) + ' seconds.  Average rate of ' + (Math.round(averageRate*10)/10) + ' transactions per second.';
-                    report += '\nAverage rate over last minute of ' + (Math.round(messageRateManager.rateOverLastMinute() * 10) / 10) + ' transactions per second.';
-                    for (ip in hostResolvedUsed) {
-                      IPs.push(ip);
-                    }
-                    report += '\nIPs used: ' + IPs.join(',') + '\n\n';
-                    lastResponse = report;
-                    loadTestRunning = false;
-                    console.log(report);
-                    for (var i = 0; i < intervals.length; i++) {
-                      clearInterval(intervals[i]);
-                    }
+              } catch(e) { }
+
+              // if using time && time has not run out
+              // or total requests less than expected requests (minus number of open connections)
+              // open another connection
+              if ( (endTime && (endTime > new Date().getTime())) || (!endTime && (totalConnectionRequests < (numberRequests - attemptedConcurrentConnections))) ) {
+                openConnection();
+              } else {
+                if (attemptedConcurrentConnections <= 0) {
+                  if (loadTestRunning) { // only run once
+                    loadTestComplete();
                   }
                 }
-              };
+              }
+            },
+            nextConnection = function() {
+              if (!nextConnectionOpened) {
+                nextConnectionOpened = true;
+                if (currentRate() && (messageRateManager.rateInLastSecond() >= currentRate())) {
+                  // ensure we don't exceed rate per second set
+                  messageRateManager.queueUntilRateDrops(closeAndOpen);
+                } else {
+                  closeAndOpen();
+                }
+              }
+            },
+            nextConnectionOpened = false,
+            connectionOpened = false;
 
-          if (currentRate() && (messageRateManager.rateInLastSecond() >= currentRate())) {
-            // ensure we don't exceed rate per second set
-            messageRateManager.queueUntilRateDrops(closeAndOpen);
-          } else {
-            closeAndOpen();
-          }
-        });
+        try {
+          ws = new webSocket((noSsl ? 'ws' : 'wss') + '://' + hostResolved + ':' + port + '/');
+
+          // on open connection, lets send a message to the server
+          ws.on('open', function() {
+            concurrentConnections += 1;
+            totalConnectionRequests += 1;
+            connectionOpened = true;
+            try {
+              ws.send('message');
+            } catch (e) {
+              concurrentConnections -= 1;
+              connectionOpened = false;
+              loadTestErrors += 1;
+              nextConnection();
+            }
+          });
+          ws.on('close', function() {
+            if (connectionOpened) {
+              concurrentConnections -= 1;
+              nextConnection(); // try open next connection in case message never received
+            }
+          });
+
+          // once we've successfully received a message, close the connection and open a new one if we have not exceeded the rate
+          ws.on('message', function(data, flags) {
+            messageRateManager.recordSuccess();
+            nextConnection();
+          });
+
+          ws.on('error', function() {
+            // close will fire afterwards
+            loadTestErrors += 1;
+            nextConnection();
+          });
+        } catch (e) {
+          loadTestErrors += 1;
+          totalConnectionRequests += 1; // must log connection requests in case test is limited by connections
+          nextConnection();
+        }
       },
 
       connIndex, openConnectionInMs,
@@ -236,7 +284,7 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
       hostResolvedUsed[hostResolved] = true;
     }
 
-    // ramp up the number of connections in one second interval
+    // ramp up the number of connections
     for (connIndex = 0; connIndex < connections; connIndex++) {
       openConnectionInMs = rampUpTime ? Math.floor( (connIndex / connections) * rampUpTime) * 1000: 0;
       setTimeout(openRateControlledConnectionCallback, openConnectionInMs);
@@ -244,7 +292,7 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
 
     intervals.push(setInterval(function() {
       if (loadTestRunning) {
-        console.log(' - connections open: ' + concurrentConnections + ', transactions p/s: ' + messageRateManager.rateInLastSecond() + ', total messages: ' + totalConnectionRequests);
+        console.log(' - connections open: ' + concurrentConnections + ', transactions attempts p/s: ' + messageRateManager.rateInLastSecond() + ', total messages: ' + totalConnectionRequests);
       }
     }, Math.min(duration ? duration / 20 : 20, 20) * 1000)); // 20 updates or at least one every 20 seconds
 
