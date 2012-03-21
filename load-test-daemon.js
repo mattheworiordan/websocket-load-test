@@ -271,7 +271,7 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
 
       // log current performance of test to the report array
       logPerformance = function() {
-        currentTestReport.push([Math.floor((new Date().getTime() - startTime) / 1000), attemptedConcurrentConnections, concurrentConnections, currentRate(), messageRateManager.rateInLastSecond()]);
+        currentTestReport.push([Math.floor((new Date().getTime() - startTime) / 1000), attemptedConcurrentConnections, concurrentConnections, (currentRate() ? currentRate() : 'max'), messageRateManager.rateInLastSecond()]);
       },
 
       intervals = [];
