@@ -71,6 +71,7 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
       lastRandomHost = randomHost(),
       hostResolved = false,
       hostResolvedUsed = {},
+      currentTestReport = [['Seconds passed','Connections attempted','Actual connections','Messages attempted','Actual Messages']],
 
       concurrentConnections = 0, // actual number of concurrent connections as updated after open/close events
       attemptedConcurrentConnections = 0, // stores number of concurrent connections before open/close event fired
@@ -164,6 +165,10 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
           IPs.push(ip);
         }
         report += '\nIPs used: ' + IPs.join(',') + '\n\n';
+        report += 'Performance report for the duration of the tests:\n';
+        for (var i = 0; i < currentTestReport.length; i++) {
+          report += currentTestReport[i].join(',') + '\n';
+        }
         lastResponse = report;
         loadTestRunning = false;
         console.log(report);
@@ -263,6 +268,11 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
         }
       },
 
+      // log current performance of test to the report array
+      logPerformance = function() {
+        currentTestReport.push([Math.floor((new Date().getTime() - startTime) / 1000), attemptedConcurrentConnections, concurrentConnections, currentRate(), messageRateManager.rateInLastSecond()]);
+      },
+
       intervals = [];
 
   console.log("Starting load testing for host " + hosts.join(',') + ":" + port);
@@ -311,7 +321,10 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
           }
         });
       }
-    }, 3000));
+    }, 5000));
+
+    // log the attempted performance and actual performance every 30 seconds
+    intervals.push(setInterval(logPerformance, 30000));
   });
 };
 
