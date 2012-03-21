@@ -169,6 +169,7 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
         for (var i = 0; i < currentTestReport.length; i++) {
           report += currentTestReport[i].join(',') + '\n';
         }
+        report += '---';
         lastResponse = report;
         loadTestRunning = false;
         console.log(report);
