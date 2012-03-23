@@ -86,7 +86,7 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
         var timeElapsed = (new Date().getTime() - startTime) / 1000;
         if (rate) {
           if (rampUpTime) {
-            return Math.max(1, Math.ceil(rate * Math.min(1, (timeElapsed / rampUpTime))));
+            return Math.max(1, Math.ceil(rate * Math.min(1, Math.pow(timeElapsed / rampUpTime, 3))));
           } else {
             return rate;
           }
