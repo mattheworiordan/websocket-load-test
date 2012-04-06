@@ -91,6 +91,10 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
       startTime = new Date().getTime(),
       endTime = duration ? startTime + duration * 1000 : false,
 
+      // if we are running a no limit concurrent connection test for a duration then set this to true so test behaves as fire and forget
+      fireAwayIgnoringConnectionLimits = !concurrent && duration,
+      fireAndForgetFn = null,
+
       // returns false if not rate limited
       // else returns current rate factoring in any ramp up time that may be required
       currentRate = function() {
@@ -204,6 +208,10 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
         }
       },
 
+      testTimeStillLeft = function() {
+        return endTime && (endTime > new Date().getTime());
+      },
+
       // open a new connection to the server
       openConnection = function() {
         attemptedConcurrentConnections += 1;
@@ -216,23 +224,39 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
                 ws.close();
               } catch(e) { }
 
-              // if using time && time has not run out
-              // or total requests less than expected requests (minus number of open connections)
-              // open another connection
-              if ( (endTime && (endTime > new Date().getTime())) || (!endTime && (totalConnectionRequests < (numberRequests - attemptedConcurrentConnections))) ) {
-                openConnection();
-              } else {
-                if (attemptedConcurrentConnections <= 0) {
-                  if (loadTestRunning) { // only run once
-                    loadTestComplete();
+              if (!fireAwayIgnoringConnectionLimits) {
+                // we're not using fire & forget but recycling connections so we only open new connections when old ones are ready to be closed
+                // if using time && time has not run out
+                // or total requests less than expected requests (minus number of open connections)
+                // open another connection
+                if ( testTimeStillLeft() || (!endTime && (totalConnectionRequests < (numberRequests - attemptedConcurrentConnections))) ) {
+                  openConnection();
+                } else {
+                  if (attemptedConcurrentConnections <= 0) {
+                    if (loadTestRunning) { // only run once
+                      loadTestComplete();
+                    }
                   }
                 }
+              } else {
+                // delay this by 1.5 seconds to ensure if message received back quickly the check to see if time is left will fail appropriately
+                setTimeout(function() {
+                  if (!testTimeStillLeft()) {
+                    // we're running a fire & forget no concurrent connection limit process
+                    // message sending initiated by setInterval so need to open new connections from here
+                    if (attemptedConcurrentConnections <= 0) {
+                      if (loadTestRunning) { // only run once
+                        loadTestComplete();
+                      }
+                    }
+                  }
+                }, 1500);
               }
             },
             nextConnection = function() {
               if (!nextConnectionOpened) {
                 nextConnectionOpened = true;
-                if (currentRate() && (messageRateManager.rateInLastSecond() >= currentRate())) {
+                if (!fireAwayIgnoringConnectionLimits && currentRate() && (messageRateManager.attemptRateInLastSecond() >= currentRate())) {
                   // ensure we don't exceed rate per second set
                   messageRateManager.queueUntilRateDrops(closeAndOpen);
                 } else {
@@ -288,7 +312,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
       connIndex, openConnectionInMs,
 
       openRateControlledConnectionCallback = function() {
-        if (currentRate() && (messageRateManager.rateInLastSecond() >= currentRate())) {
+        if (currentRate() && (messageRateManager.attemptRateInLastSecond() >= currentRate())) {
           messageRateManager.queueUntilRateDrops(openConnection);
         } else {
           openConnection();
@@ -341,6 +365,19 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
       for (connIndex = 0; connIndex < numberRequests; connIndex++) {
         openRateControlledConnectionCallback();
       }
+    } else if (fireAwayIgnoringConnectionLimits) {
+      // no concurrent connection limit, so just open a new connection whenever we need to fire a message
+      fireAndForgetFn = function() {
+        if (testTimeStillLeft()) {
+          if (messageRateManager.attemptRateInLastSecond() < currentRate()) {
+            openConnection();
+            setTimeout(fireAndForgetFn, 0);
+          } else {
+            setTimeout(fireAndForgetFn, 100);
+          }
+        }
+      };
+      fireAndForgetFn();
     } else {
       // concurrent connections set so we'll fire new requests when connections become available
       // open up the connections
@@ -352,7 +389,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
 
     intervals.push(setInterval(function() {
       if (loadTestRunning) {
-        console.log(' - connections open: ' + concurrentConnections + ', attempts p/s: ' + messageRateManager.attemptRateInLastSecond() + ', messages p/s: ' + messageRateManager.messageRateInLastSecond() + ', total messages: ' + totalConnectionRequests);
+        console.log(' - connections open: ' + concurrentConnections + ', attempts p/s: ' + messageRateManager.attemptRateInLastSecond() + ', messages p/s: ' + messageRateManager.connectionRateInLastSecond() + ', total messages: ' + totalConnectionRequests);
       }
     }, Math.min(duration ? duration / 20 : 20, 20) * 1000)); // 20 updates or at least one every 20 seconds
 
