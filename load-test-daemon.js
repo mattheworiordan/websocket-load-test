@@ -108,46 +108,56 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
 
       // object to keep track of messages sent in the last second
       messageRateManager = function(rate) {
-        var lastSecondRateLog = [], // log of messages in the last second to keep track of rate p/s
+        var lastSecondAttemptRateLog = [], // log of connection attempts in the last second to keep track of rate p/s
+            lastSecondConnectionRateLog = [], // log of successful connections in the last second to keep track of rate p/s
             messageLog = [], // log of all messages sent used for reporting when complete
             queue = [],
-            whenRateDrops = function(callback) {
-              var timeUntilNextItemShiftsOff = lastSecondRateLog[0] - (new Date().getTime() - 1000);
-              setTimeout(callback, timeUntilNextItemShiftsOff ? timeUntilNextItemShiftsOff+1 : 1);
+            whenRateDrops = function(callback, logArr) {
+              // if rate is exceeded, then this function invokes the call back when the one second has passed from first item in the list
+              var timeUntilNextItemShiftsOff = logArr[0] - (new Date().getTime() - 1000);
+              setTimeout(callback(logArr), timeUntilNextItemShiftsOff >= 0 ? timeUntilNextItemShiftsOff+1 : 1);
             },
-            processQueue = function() {
+            processQueue = function(logArr) {
               if (queue.length) {
-                if (rateInLastSecond() < currentRate()) {
+                if (rateInLastSecond(logArr) < currentRate()) {
                   queue.shift()();
                 }
-                whenRateDrops(processQueue);
+                whenRateDrops(processQueue, logArr);
               }
             },
-            rateInLastSecond = function() {
-              // clean up messages older than 1 second
-              while ((lastSecondRateLog.length > 0) && (lastSecondRateLog[0] < new Date().getTime() - 1000)) {
-                lastSecondRateLog.shift();
+            rateInLastSecond = function(logArr) {
+              // clean up older messages
+              while ((logArr.length > 0) && (logArr[0] < new Date().getTime() - 1000)) {
+                logArr.shift();
               }
-              return lastSecondRateLog.length;
+              return logArr.length;
+            },
+            attemptRateInLastSecond = function() {
+              return rateInLastSecond(lastSecondAttemptRateLog);
+            },
+            connectionRateInLastSecond = function() {
+              return rateInLastSecond(lastSecondConnectionRateLog);
             };
 
         return {
           recordAttempt: function() {
-            lastSecondRateLog.push(new Date().getTime());
+            lastSecondAttemptRateLog.push(new Date().getTime());
           },
           recordSuccess: function() {
             messageLog.push(new Date().getTime());
+            lastSecondConnectionRateLog.push(new Date().getTime());
           },
-          rateInLastSecond: rateInLastSecond,
+          attemptRateInLastSecond: attemptRateInLastSecond,
+          connectionRateInLastSecond: connectionRateInLastSecond,
           queueUntilRateDrops: function(callback) {
             // put the item onto the queue
             queue.push(callback);
             if (queue.length === 1) { // first item in queue so activate timeout
-              whenRateDrops(processQueue);
+              whenRateDrops(processQueue, lastSecondAttemptRateLog);
             }
           },
           rateOverLastMinute: function() {
-            // build a list of messages sent in the last minute
+            // build a list of successful connections in the last minute
             var i, period = 60, lastMessageInMinute;
             for (i = messageLog.length - 1; i--; messageLog[i] >= new Date().getTime() - period * 1000) {}
             lastMessageInMinute = messageLog[i+1];
@@ -293,7 +303,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
           // make sure time is closest to the
           secondsElapsed = Math.round(secondsElapsed / PERFORMANCE_LOGGING_INTERVAL) * PERFORMANCE_LOGGING_INTERVAL;
         }
-        currentTestReport.push([secondsElapsed, attemptedConcurrentConnections, concurrentConnections, (currentRate() ? currentRate() : 'max'), messageRateManager.rateInLastSecond()]);
+        currentTestReport.push([secondsElapsed, attemptedConcurrentConnections, concurrentConnections, (currentRate() ? messageRateManager.attemptRateInLastSecond() : 'max'), messageRateManager.connectionRateInLastSecond()]);
       },
 
       intervals = [];
@@ -326,15 +336,23 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
       hostResolvedUsed[hostResolved] = true;
     }
 
-    // ramp up the number of connections
-    for (connIndex = 0; connIndex < concurrent; connIndex++) {
-      openConnectionInMs = rampUpTime ? Math.floor( (connIndex / concurrent) * rampUpTime) * 1000: 0;
-      setTimeout(openRateControlledConnectionCallback, openConnectionInMs);
+    if (!concurrent && !duration) {
+      // no concurrent connection limit and just a number of max requests specified so lets open them all up now (rate limited still)
+      for (connIndex = 0; connIndex < numberRequests; connIndex++) {
+        openRateControlledConnectionCallback();
+      }
+    } else {
+      // concurrent connections set so we'll fire new requests when connections become available
+      // open up the connections
+      for (connIndex = 0; connIndex < concurrent; connIndex++) {
+        openConnectionInMs = rampUpTime ? Math.floor( (connIndex / concurrent) * rampUpTime) * 1000: 0;
+        setTimeout(openRateControlledConnectionCallback, openConnectionInMs);
+      }
     }
 
     intervals.push(setInterval(function() {
       if (loadTestRunning) {
-        console.log(' - connections open: ' + concurrentConnections + ', transactions attempts p/s: ' + messageRateManager.rateInLastSecond() + ', total messages: ' + totalConnectionRequests);
+        console.log(' - connections open: ' + concurrentConnections + ', attempts p/s: ' + messageRateManager.attemptRateInLastSecond() + ', messages p/s: ' + messageRateManager.messageRateInLastSecond() + ', total messages: ' + totalConnectionRequests);
       }
     }, Math.min(duration ? duration / 20 : 20, 20) * 1000)); // 20 updates or at least one every 20 seconds
 
