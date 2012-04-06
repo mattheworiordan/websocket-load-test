@@ -158,7 +158,8 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
             errorsPerMinute = Math.round(loadTestErrors / ((timePassed / 1000) / 60) * 1000) / 1000,
             IPs = [],
             ip,
-            report = '';
+            report = '',
+            i;
         console.log('\nFinished\n--------');
         report += 'Report for load test ' + loadTestRunning + ' complete';
         report += '\n' + totalConnectionRequests + ' connections opened over ' + (Math.round(timePassed/100)/10) + ' seconds.  Average rate of ' + (Math.round(averageRate*10)/10) + ' transactions per second.';
@@ -173,14 +174,14 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
           // if report has less than 2 line items, then add report up to now so that we don't have an empty report as we only generate report lines PERFORMANCE_LOGGING_INTERVAL seconds
           logPerformance({ showExactSeconds: true });
         }
-        for (var i = 0; i < currentTestReport.length; i++) {
+        for (i = 0; i < currentTestReport.length; i++) {
           report += currentTestReport[i].join(',') + '\n';
         }
         report += '---';
         lastResponse = report;
         loadTestRunning = false;
         console.log(report);
-        for (var i = 0; i < intervals.length; i++) {
+        for (i = 0; i < intervals.length; i++) {
           clearInterval(intervals[i]);
         }
       },
