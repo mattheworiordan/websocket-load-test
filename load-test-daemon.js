@@ -166,6 +166,10 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
         }
         report += '\nIPs used: ' + IPs.join(',') + '\n\n';
         report += 'Performance report for the duration of the tests:\n';
+        if (currentTestReport.length < 2) {
+          // if report has less than 2 line items, then add report up to now so that we don't have an empty report as we only generate report lines every 30 seconds
+          logPerformance();
+        }
         for (var i = 0; i < currentTestReport.length; i++) {
           report += currentTestReport[i].join(',') + '\n';
         }
