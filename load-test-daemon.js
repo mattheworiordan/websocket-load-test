@@ -39,7 +39,8 @@ httpServer.on('request', function (req, res) {
     if (loadTestRunning) {
       res.end('Load test ' + loadTestRunning + ' already running');
     } else {
-      var params = querystring.parse(req.url.replace(/^\/start\?/, ''));
+      var params = querystring.parse(req.url.replace(/^\/start\?/, '')),
+          loadTestError;
       if (!params.host) {
         res.end('Error: Host field is required');
       } else if (!params.port) {
@@ -48,8 +49,14 @@ httpServer.on('request', function (req, res) {
         loadTestRunning = Math.floor(Math.random()*100000);
         loadTestErrors = 0;
         lastResponse = null;
-        loadTestClient(params.host, params.port, params.concurrent || 100, params.number || 1000, params.ramp_up_time || 0, params.no_ssl, params.rate, params.duration);
-        res.end('Started load test number ' + loadTestRunning);
+        loadTestError = loadTestClient(params.host, params.port, params.concurrent, params.number || 1000, params.ramp_up_time || 0, params.no_ssl, params.rate, params.duration);
+        if (loadTestError) {
+          lastResponse = '!!! Error, load test did not start: ' + loadTestError;
+          loadTestRunning = false;
+          res.end(lastResponse);
+        } else {
+          res.end('Started load test number ' + loadTestRunning);
+        }
       }
     }
   } else if (req.url.match(/^\/report/)) {
@@ -67,9 +74,10 @@ httpServer.on('request', function (req, res) {
   }
 });
 
-var loadTestClient = function(hostList, port, connections, numberRequests, rampUpTime, noSsl, rate, duration) {
+var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUpTime, noSsl, rate, duration) {
   /* options */
-  var hosts = hostList.split(','),
+  var errorResponse = null, // return true from loadTestClient if tests started OK
+      hosts = hostList.split(','),
       randomHost = function() { return hosts[Math.floor(Math.random() * hosts.length)]; },
       lastRandomHost = randomHost(),
       hostResolved = false,
@@ -293,8 +301,17 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
   console.log("Starting load testing for host " + hosts.join(',') + ":" + port);
   if (endTime) {
     console.log("Running for " + duration + " seconds");
+  }
+  if (concurrent) {
+    console.log("Set to use " + concurrent + " concurrent connections");
   } else {
-    console.log("Set to open " + connections + " connections");
+    if (!rate && duration) {
+      errorResponse = 'Cannot run test with an unlimited number of concurrent connections without a max rate or using a time based test (as opposed to specifying a number of requests)';
+      console.log('!!! Error: ' + errorResponse);
+      return errorResponse;
+    } else {
+      console.log("Set to use unlimited connections");
+    }
   }
   console.log("Using SSL: " + (noSsl ? 'No' : 'Yes'));
 
@@ -310,8 +327,8 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
     }
 
     // ramp up the number of connections
-    for (connIndex = 0; connIndex < connections; connIndex++) {
-      openConnectionInMs = rampUpTime ? Math.floor( (connIndex / connections) * rampUpTime) * 1000: 0;
+    for (connIndex = 0; connIndex < concurrent; connIndex++) {
+      openConnectionInMs = rampUpTime ? Math.floor( (connIndex / concurrent) * rampUpTime) * 1000: 0;
       setTimeout(openRateControlledConnectionCallback, openConnectionInMs);
     }
 
@@ -341,6 +358,8 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
     // log the attempted performance and actual performance every PERFORMANCE_LOGGING_INTERVAL seconds
     intervals.push(setInterval(logPerformance, PERFORMANCE_LOGGING_INTERVAL * 1000));
   });
+
+  return errorResponse;
 };
 
 console.log('Ready and listening on port ' + serverPort);
