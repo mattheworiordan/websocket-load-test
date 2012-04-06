@@ -15,6 +15,9 @@ var argv = require('optimist')
       .alias('p', 'port').describe('p', 'the port the service should run on ').default('p', 8000)
       .describe('help', 'show this help');
 
+var PERFORMANCE_LOGGING_INTERVAL = 30, // frequency in seconds to log stats for collection by bee master
+    DNS_QUERY_INTERVAL = 5; // frequency of DNS queries to see if new ELB instances are online
+
 if (argv.argv.help) {
   argv.showHelp();
   process.exit(0);
@@ -167,8 +170,8 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
         report += '\nIPs used: ' + IPs.join(',') + '\n\n';
         report += 'Performance report for the duration of the tests:\n';
         if (currentTestReport.length < 2) {
-          // if report has less than 2 line items, then add report up to now so that we don't have an empty report as we only generate report lines every 30 seconds
-          logPerformance();
+          // if report has less than 2 line items, then add report up to now so that we don't have an empty report as we only generate report lines PERFORMANCE_LOGGING_INTERVAL seconds
+          logPerformance({ showExactSeconds: true });
         }
         for (var i = 0; i < currentTestReport.length; i++) {
           report += currentTestReport[i].join(',') + '\n';
@@ -274,8 +277,14 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
       },
 
       // log current performance of test to the report array
-      logPerformance = function() {
-        currentTestReport.push([Math.floor((new Date().getTime() - startTime) / 1000), attemptedConcurrentConnections, concurrentConnections, (currentRate() ? currentRate() : 'max'), messageRateManager.rateInLastSecond()]);
+      logPerformance = function(options) {
+        var secondsElapsed = Math.floor((new Date().getTime() - startTime) / 1000),
+            opts = (typeof options === 'object' ? options : {});
+        if (!opts.showExactSeconds) {
+          // make sure time is closest to the
+          secondsElapsed = Math.round(secondsElapsed / PERFORMANCE_LOGGING_INTERVAL) * PERFORMANCE_LOGGING_INTERVAL;
+        }
+        currentTestReport.push([secondsElapsed, attemptedConcurrentConnections, concurrentConnections, (currentRate() ? currentRate() : 'max'), messageRateManager.rateInLastSecond()]);
       },
 
       intervals = [];
@@ -311,7 +320,7 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
       }
     }, Math.min(duration ? duration / 20 : 20, 20) * 1000)); // 20 updates or at least one every 20 seconds
 
-    // update the DNS every 5 seconds
+    // update the DNS every DNS_QUERY_INTERVAL seconds
     intervals.push(setInterval(function() {
       if (loadTestRunning) {
         lastRandomHost = randomHost();
@@ -326,10 +335,10 @@ var loadTestClient = function(hostList, port, connections, numberRequests, rampU
           }
         });
       }
-    }, 5000));
+    }, DNS_QUERY_INTERVAL * 1000));
 
-    // log the attempted performance and actual performance every 30 seconds
-    intervals.push(setInterval(logPerformance, 30000));
+    // log the attempted performance and actual performance every PERFORMANCE_LOGGING_INTERVAL seconds
+    intervals.push(setInterval(logPerformance, PERFORMANCE_LOGGING_INTERVAL * 1000));
   });
 };
 
