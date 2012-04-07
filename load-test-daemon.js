@@ -16,7 +16,8 @@ var argv = require('optimist')
       .describe('help', 'show this help');
 
 var PERFORMANCE_LOGGING_INTERVAL = 30, // frequency in seconds to log stats for collection by bee master
-    DNS_QUERY_INTERVAL = 5; // frequency of DNS queries to see if new ELB instances are online
+    DNS_QUERY_INTERVAL = 5, // frequency of DNS queries to see if new ELB instances are online
+    DEFAULT_CONNECTION_TIMEOUT = 15; // if we can't handshake and echo a message in this time consider the connection dead, can be overriden using --timeout
 
 if (argv.argv.help) {
   argv.showHelp();
@@ -49,7 +50,7 @@ httpServer.on('request', function (req, res) {
         loadTestRunning = Math.floor(Math.random()*100000);
         loadTestErrors = 0;
         lastResponse = null;
-        loadTestError = loadTestClient(params.host, params.port, params.concurrent, params.number || 1000, params.ramp_up_time || 0, params.no_ssl, params.rate, params.duration);
+        loadTestError = loadTestClient(params.host, params.port, params.concurrent, params.number || 1000, params.ramp_up_time || 0, params.no_ssl, params.rate, params.duration, params.timeout);
         if (loadTestError) {
           lastResponse = '!!! Error, load test did not start: ' + loadTestError;
           loadTestRunning = false;
@@ -74,7 +75,7 @@ httpServer.on('request', function (req, res) {
   }
 });
 
-var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUpTime, noSsl, rate, duration) {
+var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUpTime, noSsl, rate, duration, timeout) {
   /* options */
   var errorResponse = null, // return true from loadTestClient if tests started OK
       hosts = hostList.split(','),
@@ -82,7 +83,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
       lastRandomHost = randomHost(),
       hostResolved = false,
       hostResolvedUsed = {},
-      currentTestReport = [['Seconds passed','Connections attempted','Actual connections','Messages attempted','Actual Messages']],
+      currentTestReport = [['Seconds passed','Connections attempted','Actual connections','Messages attempted','Actual Messages','Connection Errors']],
 
       concurrentConnections = 0, // actual number of concurrent connections as updated after open/close events
       attemptedConcurrentConnections = 0, // stores number of concurrent connections before open/close event fired
@@ -94,6 +95,8 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
       // if we are running a no limit concurrent connection test for a duration then set this to true so test behaves as fire and forget
       fireAwayIgnoringConnectionLimits = !concurrent && duration,
       fireAndForgetFn = null,
+
+      mustEchoMessageIn = !isNaN(parseInt(timeout, 10)) ? timeout * 1000 : DEFAULT_CONNECTION_TIMEOUT * 1000,
 
       // returns false if not rate limited
       // else returns current rate factoring in any ramp up time that may be required
@@ -115,6 +118,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
         var lastSecondAttemptRateLog = [], // log of connection attempts in the last second to keep track of rate p/s
             lastSecondConnectionRateLog = [], // log of successful connections in the last second to keep track of rate p/s
             messageLog = [], // log of all messages sent used for reporting when complete
+            errorLog = [], // log of all errors typically time outs caught by explicit mustEchoMessageIn
             queue = [],
             whenRateDrops = function(callback, logArr) {
               // if rate is exceeded, then this function invokes the call back when the one second has passed from first item in the list
@@ -151,8 +155,24 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
             messageLog.push(new Date().getTime());
             lastSecondConnectionRateLog.push(new Date().getTime());
           },
+          recordError: function() {
+            errorLog.push(new Date().getTime());
+          },
           attemptRateInLastSecond: attemptRateInLastSecond,
           connectionRateInLastSecond: connectionRateInLastSecond,
+          errorsAveragedPerSecond: function() {
+            // get average number of errors per second since last performance logged or since start of test is less than performance logged interval
+            var i, timePassed = (new Date().getTime() - startTime) / 1000, timeNow = new Date().getTime();
+            for (i = errorLog.length - 1; i--; (i >= 0) && (errorLog[i] >= timeNow - PERFORMANCE_LOGGING_INTERVAL * 1000) ) {}
+            if (errorLog.length) {
+              return Math.round((errorLog.length - 1 - i) / Math.min(PERFORMANCE_LOGGING_INTERVAL, timePassed));
+            } else {
+              return 0;
+            }
+          },
+          totalErrors: function() {
+            return errorLog.length;
+          },
           queueUntilRateDrops: function(callback) {
             // put the item onto the queue
             queue.push(callback);
@@ -177,7 +197,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
       loadTestComplete = function() {
         var timePassed = new Date().getTime() - startTime,
             averageRate = totalConnectionRequests / (timePassed / 1000),
-            errorsPerMinute = Math.round(loadTestErrors / ((timePassed / 1000) / 60) * 1000) / 1000,
+            errorsPerMinute = Math.round(messageRateManager.totalErrors() / ((timePassed / 1000) / 60) * 1000) / 1000,
             IPs = [],
             ip,
             report = '',
@@ -186,12 +206,12 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
         report += 'Report for load test ' + loadTestRunning + ' complete';
         report += '\n' + totalConnectionRequests + ' connections opened over ' + (Math.round(timePassed/100)/10) + ' seconds.  Average rate of ' + (Math.round(averageRate*10)/10) + ' transactions per second.';
         report += '\nAverage rate over last minute of ' + (Math.round(messageRateManager.rateOverLastMinute() * 10) / 10) + ' transactions per second.';
-        report += '\nLoad test errors ' + loadTestErrors + ', errors per minute ' + errorsPerMinute;
+        report += '\nLoad test errors ' + messageRateManager.totalErrors() + ', average errors per minute ' + (Math.round(errorsPerMinute * 10) / 10);
         for (ip in hostResolvedUsed) {
           IPs.push(ip);
         }
         report += '\nIPs used: ' + IPs.join(',') + '\n\n';
-        report += 'Performance report for the duration of the tests:\n';
+        report += 'Performance report for the rate p/s for the duration of the tests:\n';
         if (currentTestReport.length < 2) {
           // if report has less than 2 line items, then add report up to now so that we don't have an empty report as we only generate report lines PERFORMANCE_LOGGING_INTERVAL seconds
           logPerformance({ showExactSeconds: true });
@@ -218,6 +238,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
         messageRateManager.recordAttempt();
 
         var ws,
+            connectionTimeout,
             closeAndOpen = function() {
               attemptedConcurrentConnections -= 1;
               try {
@@ -255,6 +276,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
             },
             nextConnection = function() {
               if (!nextConnectionOpened) {
+                clearTimeout(connectionTimeout);
                 nextConnectionOpened = true;
                 if (!fireAwayIgnoringConnectionLimits && currentRate() && (messageRateManager.attemptRateInLastSecond() >= currentRate())) {
                   // ensure we don't exceed rate per second set
@@ -299,11 +321,16 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
 
           ws.on('error', function() {
             // close will fire afterwards
-            loadTestErrors += 1;
+            messageRateManager.recordError();
             nextConnection();
           });
+
+          connectionTimeout = setTimeout(function() {
+            messageRateManager.recordError();
+            nextConnection();
+          }, mustEchoMessageIn)
         } catch (e) {
-          loadTestErrors += 1;
+          messageRateManager.recordError();
           totalConnectionRequests += 1; // must log connection requests in case test is limited by connections
           nextConnection();
         }
@@ -320,6 +347,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
       },
 
       // log current performance of test to the report array
+      // format: elapsed time(s),connections attempted,actual connections,messages attempted,messages actual
       logPerformance = function(options) {
         var secondsElapsed = Math.floor((new Date().getTime() - startTime) / 1000),
             opts = (typeof options === 'object' ? options : {});
@@ -327,12 +355,12 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
           // make sure time is closest to the
           secondsElapsed = Math.round(secondsElapsed / PERFORMANCE_LOGGING_INTERVAL) * PERFORMANCE_LOGGING_INTERVAL;
         }
-        currentTestReport.push([secondsElapsed, attemptedConcurrentConnections, concurrentConnections, (currentRate() ? messageRateManager.attemptRateInLastSecond() : 'max'), messageRateManager.connectionRateInLastSecond()]);
+        currentTestReport.push([secondsElapsed, attemptedConcurrentConnections, concurrentConnections, (currentRate() ? messageRateManager.attemptRateInLastSecond() : 'max'), messageRateManager.connectionRateInLastSecond(), messageRateManager.errorsAveragedPerSecond()]);
       },
 
       intervals = [];
 
-  console.log("Starting load testing for host " + hosts.join(',') + ":" + port);
+  console.log("Starting load testing for host " + hosts.join(',') + ":" + port + ' with a timeout of ' + (mustEchoMessageIn/1000) + 's');
   if (endTime) {
     console.log("Running for " + duration + " seconds");
   }
@@ -389,7 +417,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
 
     intervals.push(setInterval(function() {
       if (loadTestRunning) {
-        console.log(' - connections open: ' + concurrentConnections + ', attempts p/s: ' + messageRateManager.attemptRateInLastSecond() + ', messages p/s: ' + messageRateManager.connectionRateInLastSecond() + ', total messages: ' + totalConnectionRequests);
+        console.log(' - connections open: ' + concurrentConnections + ', attempts p/s: ' + messageRateManager.attemptRateInLastSecond() + ', messages p/s: ' + messageRateManager.connectionRateInLastSecond() + ', total messages: ' + totalConnectionRequests + ', total errors: ' + messageRateManager.totalErrors());
       }
     }, Math.min(duration ? duration / 20 : 20, 20) * 1000)); // 20 updates or at least one every 20 seconds
 
