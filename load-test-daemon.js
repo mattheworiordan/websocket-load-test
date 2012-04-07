@@ -16,7 +16,8 @@ var argv = require('optimist')
       .describe('help', 'show this help');
 
 var PERFORMANCE_LOGGING_INTERVAL = 30, // frequency in seconds to log stats for collection by bee master
-    DNS_QUERY_INTERVAL = 5, // frequency of DNS queries to see if new ELB instances are online
+    MAX_DNS_ENTRY_AGE = 300, // keep using an old DNS resolution entry for 5 minutes i.e. when ELB removes an old server keep using it for 5 minutes
+    DNS_QUERY_INTERVAL = 5; // frequency of DNS queries to see if new ELB instances are online
     DEFAULT_CONNECTION_TIMEOUT = 15; // if we can't handshake and echo a message in this time consider the connection dead, can be overriden using --timeout
 
 if (argv.argv.help) {
@@ -80,9 +81,6 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
   var errorResponse = null, // return true from loadTestClient if tests started OK
       hosts = hostList.split(','),
       randomHost = function() { return hosts[Math.floor(Math.random() * hosts.length)]; },
-      lastRandomHost = randomHost(),
-      hostResolved = false,
-      hostResolvedUsed = {},
       currentTestReport = [['Seconds passed','Connections attempted','Actual connections','Messages attempted','Actual Messages','Connection Errors']],
 
       concurrentConnections = 0, // actual number of concurrent connections as updated after open/close events
@@ -194,6 +192,64 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
         };
       }(rate),
 
+      dnsResolutionManager = function() {
+        var IPsUsed = {},
+            warnedAboutDnsResolution = false,
+            addIP = function(IP) {
+              IPsUsed[IP] = new Date().getTime();
+            },
+            resolve = function(callback) {
+              var host = randomHost(), i;
+              dns.resolve4(host, function (err, addresses) {
+                if (err) {
+                  if (!(host in IPsUsed)) {
+                    console.log("Warning, could not resolve DNS for " + lastRandomHost);
+                  }
+                  addIP(host);
+                } else {
+                  for (i = 0; i < addresses.length; i++) {
+                    if (!(addresses[i] in IPsUsed)) {
+                      console.log(" .. resolved DNS for " + host + " to " + addresses[i]);
+                    }
+                    addIP(addresses[i]);
+                  }
+                }
+                if (callback) callback();
+              });
+            };
+
+        return {
+          resolveDns: resolve,
+
+          randomIP: function() {
+            var timeNow = new Date().getTime(),
+                validIPs = [],
+                IP;
+            // build up list of IPs not older than MAX_DNS_ENTRY_AGE(s)
+            for (IP in IPsUsed) {
+              if (IPsUsed.hasOwnProperty(IP) && (IPsUsed[IP] > timeNow - MAX_DNS_ENTRY_AGE * 1000)) {
+                validIPs.push(IP);
+              }
+            }
+            return validIPs[Math.floor(Math.random()*validIPs.length)];
+          },
+
+          getList: function() {
+            var IPs = [], IP, timeNow = new Date().getTime();
+            for (IP in IPsUsed) {
+              if (IPsUsed.hasOwnProperty(IP)) {
+                if (IPsUsed[IP] > timeNow - MAX_DNS_ENTRY_AGE * 1000) {
+                  IPs.push(IP);
+                } else {
+                  IPs.push('(' + IP + ')');
+                }
+              }
+            }
+            return IPs.join(',');
+          }
+        };
+      }(),
+
       loadTestComplete = function() {
         var timePassed = new Date().getTime() - startTime,
             averageRate = totalConnectionRequests / (timePassed / 1000),
@@ -207,11 +263,8 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
         report += '\n' + totalConnectionRequests + ' connections opened over ' + (Math.round(timePassed/100)/10) + ' seconds.  Average rate of ' + (Math.round(averageRate*10)/10) + ' transactions per second.';
         report += '\nAverage rate over last minute of ' + (Math.round(messageRateManager.rateOverLastMinute() * 10) / 10) + ' transactions per second.';
         report += '\nLoad test errors ' + messageRateManager.totalErrors() + ', average errors per minute ' + (Math.round(errorsPerMinute * 10) / 10);
-        for (ip in hostResolvedUsed) {
-          IPs.push(ip);
-        }
-        report += '\nIPs used: ' + IPs.join(',') + '\n\n';
-        report += 'Performance report for the rate p/s for the duration of the tests:\n';
+        report += '\nIPs used: ' + dnsResolutionManager.getList() + '\n\n';
+        report += 'Performance report for the duration of the tests:\n';
         if (currentTestReport.length < 2) {
           // if report has less than 2 line items, then add report up to now so that we don't have an empty report as we only generate report lines PERFORMANCE_LOGGING_INTERVAL seconds
           logPerformance({ showExactSeconds: true });
@@ -290,7 +343,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
             connectionOpened = false;
 
         try {
-          ws = new webSocket((noSsl ? 'ws' : 'wss') + '://' + hostResolved + ':' + port + '/');
+          ws = new webSocket((noSsl ? 'ws' : 'wss') + '://' + dnsResolutionManager.randomIP() + ':' + port + '/');
 
           // on open connection, lets send a message to the server
           ws.on('open', function() {
@@ -377,17 +430,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
   }
   console.log("Using SSL: " + (noSsl ? 'No' : 'Yes'));
 
-  dns.resolve4(lastRandomHost, function (err, addresses) {
-    if (err) {
-      console.log("Warning, could not resolve DNS for " + lastRandomHost);
-      hostResolved = lastRandomHost;
-      hostResolvedUsed[hostResolved] = true;
-    } else {
-      console.log("Resolved DNS for " + lastRandomHost + " to " + addresses.join(', '));
-      hostResolved = addresses[Math.floor(Math.random()*addresses.length)];
-      hostResolvedUsed[hostResolved] = true;
-    }
-
+  dnsResolutionManager.resolveDns(function() {
     if (!concurrent && !duration) {
       // no concurrent connection limit and just a number of max requests specified so lets open them all up now (rate limited still)
       for (connIndex = 0; connIndex < numberRequests; connIndex++) {
@@ -417,24 +460,14 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
 
     intervals.push(setInterval(function() {
       if (loadTestRunning) {
-        console.log(' - connections open: ' + concurrentConnections + ', attempts p/s: ' + messageRateManager.attemptRateInLastSecond() + ', messages p/s: ' + messageRateManager.connectionRateInLastSecond() + ', total messages: ' + totalConnectionRequests + ', total errors: ' + messageRateManager.totalErrors());
+        console.log(' - attempted conns: ' + attemptedConcurrentConnections + ', conns: ' + concurrentConnections + ', message attempts p/s: ' + messageRateManager.attemptRateInLastSecond() + ', messages p/s: ' + messageRateManager.connectionRateInLastSecond() + ', total messages: ' + totalConnectionRequests + ', total errors: ' + messageRateManager.totalErrors());
       }
     }, Math.min(duration ? duration / 20 : 20, 20) * 1000)); // 20 updates or at least one every 20 seconds
 
     // update the DNS every DNS_QUERY_INTERVAL seconds
     intervals.push(setInterval(function() {
       if (loadTestRunning) {
-        lastRandomHost = randomHost();
-        dns.resolve4(lastRandomHost, function (err, addresses) {
-          if (!err) {
-            var newHost = addresses[Math.floor(Math.random()*addresses.length)];
-            if (newHost !== hostResolved) {
-              console.log("DNS resolution changed to " + newHost + ' for ' + lastRandomHost);
-              hostResolved = newHost;
-              hostResolvedUsed[hostResolved] = true;
-            }
-          }
-        });
+        dnsResolutionManager.resolveDns();
       }
     }, DNS_QUERY_INTERVAL * 1000));
 
