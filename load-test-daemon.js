@@ -95,7 +95,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
   /* options */
   var hosts = hostList.split(','),
       randomHost = function() { return hosts[Math.floor(Math.random() * hosts.length)]; },
-      currentTestReport = [['Seconds passed','Connections attempted','Actual connections','Messages attempted','Actual Messages','Connection Errors','Misfires']],
+      currentTestReport = [['Seconds passed','Connections attempted','Actual connections','Messages attempted','Actual Messages','Connection Errors','Misfires','Latency(ms)']],
 
       concurrentConnections = 0, // actual number of concurrent connections as updated after open/close events
       attemptedConcurrentConnections = 0, // stores number of concurrent connections before open/close event fired
@@ -129,12 +129,14 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
             messageLog = [], // log of all messages sent used for reporting when complete
             errorLog = [], // log of all errors typically when max connection limit reached
             lastSecondMisfireLog = [], // log of misfires which occur when connection limit is hit and message cannot be sent
+            lastSecondLatencyLog = [], // log of latency (time from connection open to successful message echo) times to average out for report
             rateInLastSecond = function(logArr) { // rate in the previous 5 seconds
               var TIME_MEASURED = 5000,
-                  timePassed = Math.max((new Date().getTime() - startTime) / 1000, 1);
+                  timePassed = Math.max((new Date().getTime() - startTime) / 1000, 1),
+                  timeNow = new Date().getTime();
 
               // clean up older messages
-              while ((logArr.length > 0) && (logArr[0] < new Date().getTime() - TIME_MEASURED)) {
+              while ((logArr.length > 0) && (logArr[0] < timeNow - TIME_MEASURED)) {
                 logArr.shift();
               }
               return Math.round(logArr.length / Math.min(TIME_MEASURED / 1000, timePassed));
@@ -147,6 +149,21 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
             },
             misfiresInLastSecond = function() {
               return rateInLastSecond(lastSecondMisfireLog);
+            },
+            latencyInLastSecond = function() {
+              var TIME_MEASURED = 5000,
+                  timeNow = new Date().getTime(),
+                  index,
+                  latencyTotal = 0;
+
+              // clean up older messages
+              while ((lastSecondLatencyLog.length > 0) && (lastSecondLatencyLog[0].time < timeNow - TIME_MEASURED)) {
+                lastSecondLatencyLog.shift();
+              }
+              for (index = 0; index < lastSecondLatencyLog.length; index++) {
+                latencyTotal += lastSecondLatencyLog[index].latencyMs;
+              }
+              return Math.round(latencyTotal / lastSecondLatencyLog.length) || 0;
             };
 
         return {
@@ -164,9 +181,16 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
           recordMisfire: function() {
             lastSecondMisfireLog.push(new Date().getTime());
           },
+          recordLatency: function(latencyMs) {
+            lastSecondLatencyLog.push({
+              time: new Date().getTime(),
+              latencyMs: latencyMs
+            });
+          },
           attemptRateInLastSecond: attemptRateInLastSecond,
           connectionRateInLastSecond: connectionRateInLastSecond,
           misfiresInLastSecond: misfiresInLastSecond,
+          latencyInLastSecond: latencyInLastSecond,
           errorsAveragedPerSecond: function() {
             // get average number of errors per second since last performance logged or since start of test if less than performance logged interval
             var i, timePassed = (new Date().getTime() - startTime) / 1000, timeNow = new Date().getTime();
@@ -268,7 +292,8 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
           (currentRate() ? messageRateManager.attemptRateInLastSecond() : 'max'),
           messageRateManager.connectionRateInLastSecond(),
           messageRateManager.errorsAveragedPerSecond(),
-          messageRateManager.misfiresInLastSecond()
+          messageRateManager.misfiresInLastSecond(),
+          messageRateManager.latencyInLastSecond()
         ]);
       },
 
@@ -323,6 +348,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
       // open a new connection to the server
       openConnection = function() {
         var ws,
+            connectionStartTime = new Date().getTime(),
             connectionId = attemptedConcurrentConnections + 1,
             connectionIsOpen = false,
             attemptedConnectionClosed = false,
@@ -349,6 +375,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
               if (connectionIsOpen === true) {
                 concurrentConnections -= 1;
                 connectionIsOpen = false;
+                messageRateManager.recordLatency(new Date().getTime() - connectionStartTime);
               }
 
               // ensure connection count for attempted connections is reduced only once and check for last test is run once
@@ -457,7 +484,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
     // console status updates
     intervals.push(setInterval(function() {
       if (loadTestRunning) {
-        console.log(' - attempted conns: ' + attemptedConcurrentConnections + ', conns: ' + concurrentConnections + ', message attempts p/s: ' + messageRateManager.attemptRateInLastSecond() + ', messages p/s: ' + messageRateManager.connectionRateInLastSecond() + ', misfires p/s: ' + messageRateManager.misfiresInLastSecond() + ', total messages: ' + totalConnectionsOpened + ', total errors: ' + messageRateManager.totalErrors());
+        console.log(' - attempted conns: ' + attemptedConcurrentConnections + ', conns: ' + concurrentConnections + ', msg attempts p/s: ' + messageRateManager.attemptRateInLastSecond() + ', msgs p/s: ' + messageRateManager.connectionRateInLastSecond() + ', misfires p/s: ' + messageRateManager.misfiresInLastSecond() + ', latency: ' + messageRateManager.latencyInLastSecond() + 'ms, messages: ' + totalConnectionsOpened + ', errors: ' + messageRateManager.totalErrors());
       }
     }, Math.min(duration ? duration / 20 : 20, 20) * 1000)); // 20 updates or at least one every 20 seconds
 
