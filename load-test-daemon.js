@@ -1,10 +1,29 @@
 #!/usr/bin/env node
 
 /**********************************
- * Usage
+ * Web Socket Echo Load Testing Daemon
  *
+ * Usage:
  * load-test-daemon.js -port|--p=<port>
- **********************************/
+ **********************************
+
+ * Instructions triggered by HTTP request with querystring parameters
+ * (*) denotes required
+ *
+ * /start (Start load test)
+ * example: http://localhost:8000/start?host=localhost&port=8000&no_ssl=true&duration=10&rate=30
+ *   - host*: comma seperated list of one or more hosts
+ *   - port*: http port to use
+ *   - number: number of requests to make in this load test (defaults to 1000)
+ *   - duration: duration in seconds to run the test, if specified -number parameter is ignored
+ *   - concurrent: max number of concurrent connections to use (misfires will occur if an attempted request is made that would exceed the connection count)
+ *   - rate: max number of request per second to fire at the server, scaled up bicubicly if ramp_up_time if specified
+ *   - ramp_up_time: time in seconds to ramp up the rate using a bicubic curve
+ *   - no_ssl: do not use SSL, SSL protocal is assumed by default
+ *
+ * /report (View the load test report once complete)
+ * example: http://localhost:8000/report
+ */
 
 var webSocket = require('ws'),
     dns = require('dns'),
@@ -17,8 +36,10 @@ var argv = require('optimist')
 
 var PERFORMANCE_LOGGING_INTERVAL = 30, // frequency in seconds to log stats for collection by bee master
     MAX_DNS_ENTRY_AGE = 300, // keep using an old DNS resolution entry for 5 minutes i.e. when ELB removes an old server keep using it for 5 minutes
-    DNS_QUERY_INTERVAL = 5; // frequency of DNS queries to see if new ELB instances are online
-    DEFAULT_CONNECTION_TIMEOUT = 15; // if we can't handshake and echo a message in this time consider the connection dead, can be overriden using --timeout
+    DNS_QUERY_INTERVAL = 5, // frequency of DNS queries to see if new ELB instances are online
+    DEFAULT_CONCURRENT = 250, // default max concurrent connections to use
+    DEFAULT_NUMBER_REQUESTS = 1000, // default number of requests to fire at the server if not a time based test
+    OPEN = 1; // web socket OPEN readyState
 
 if (argv.argv.help) {
   argv.showHelp();
@@ -30,11 +51,12 @@ if (argv.argv.help) {
 var serverPort = argv.p,
     httpServer = require('http').createServer(),
     lastResponse = null,
-    loadTestRunning = false,
-    loadTestErrors = 0;
+    loadTestRunning = false;
+
+// start an HTTP server for responding to triggers/reports
 httpServer.listen(serverPort);
 
-// enable http server to respond to a simple GET request
+// enable http server to respond to a simple GET request for triggers/reports
 httpServer.on('request', function (req, res) {
   res.writeHead(200, {'Content-Type': 'text/plain'});
   if (req.url.match(/^\/start/)) {
@@ -49,16 +71,9 @@ httpServer.on('request', function (req, res) {
         res.end('Error: Port field is required');
       } else {
         loadTestRunning = Math.floor(Math.random()*100000);
-        loadTestErrors = 0;
         lastResponse = null;
-        loadTestError = loadTestClient(params.host, params.port, params.concurrent, params.number || 1000, params.ramp_up_time || 0, params.no_ssl, params.rate, params.duration, params.timeout);
-        if (loadTestError) {
-          lastResponse = '!!! Error, load test did not start: ' + loadTestError;
-          loadTestRunning = false;
-          res.end(lastResponse);
-        } else {
-          res.end('Started load test number ' + loadTestRunning);
-        }
+        loadTestClient(params.host, params.port, params.concurrent || DEFAULT_CONCURRENT, params.number || DEFAULT_NUMBER_REQUESTS, params.ramp_up_time || 0, params.no_ssl, params.rate, params.duration);
+        res.end('Started load test number ' + loadTestRunning);
       }
     }
   } else if (req.url.match(/^\/report/)) {
@@ -76,25 +91,21 @@ httpServer.on('request', function (req, res) {
   }
 });
 
-var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUpTime, noSsl, rate, duration, timeout) {
+var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUpTime, noSsl, rate, duration) {
   /* options */
-  var errorResponse = null, // return true from loadTestClient if tests started OK
-      hosts = hostList.split(','),
+  var hosts = hostList.split(','),
       randomHost = function() { return hosts[Math.floor(Math.random() * hosts.length)]; },
-      currentTestReport = [['Seconds passed','Connections attempted','Actual connections','Messages attempted','Actual Messages','Connection Errors']],
+      currentTestReport = [['Seconds passed','Connections attempted','Actual connections','Messages attempted','Actual Messages','Connection Errors','Misfires']],
 
       concurrentConnections = 0, // actual number of concurrent connections as updated after open/close events
       attemptedConcurrentConnections = 0, // stores number of concurrent connections before open/close event fired
 
-      totalConnectionRequests = 0,
+      totalConnectionsOpened = 0,
+      totalConnectionAttempts = 0,
       startTime = new Date().getTime(),
       endTime = duration ? startTime + duration * 1000 : false,
 
-      // if we are running a no limit concurrent connection test for a duration then set this to true so test behaves as fire and forget
-      fireAwayIgnoringConnectionLimits = !concurrent && duration,
-      fireAndForgetFn = null,
-
-      mustEchoMessageIn = !isNaN(parseInt(timeout, 10)) ? timeout * 1000 : DEFAULT_CONNECTION_TIMEOUT * 1000,
+      intervals = [], // array to store setInterval timers so that they can be stopped when load test is complete
 
       // returns false if not rate limited
       // else returns current rate factoring in any ramp up time that may be required
@@ -112,42 +123,36 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
       },
 
       // object to keep track of messages sent in the last second
-      messageRateManager = function(rate) {
+      messageRateManager = function() {
         var lastSecondAttemptRateLog = [], // log of connection attempts in the last second to keep track of rate p/s
             lastSecondConnectionRateLog = [], // log of successful connections in the last second to keep track of rate p/s
             messageLog = [], // log of all messages sent used for reporting when complete
-            errorLog = [], // log of all errors typically time outs caught by explicit mustEchoMessageIn
-            queue = [],
-            whenRateDrops = function(callback, logArr) {
-              // if rate is exceeded, then this function invokes the call back when the one second has passed from first item in the list
-              var timeUntilNextItemShiftsOff = logArr[0] - (new Date().getTime() - 1000);
-              setTimeout(callback(logArr), timeUntilNextItemShiftsOff >= 0 ? timeUntilNextItemShiftsOff+1 : 1);
-            },
-            processQueue = function(logArr) {
-              if (queue.length) {
-                if (rateInLastSecond(logArr) < currentRate()) {
-                  queue.shift()();
-                }
-                whenRateDrops(processQueue, logArr);
-              }
-            },
-            rateInLastSecond = function(logArr) {
+            errorLog = [], // log of all errors typically when max connection limit reached
+            lastSecondMisfireLog = [], // log of misfires which occur when connection limit is hit and message cannot be sent
+            rateInLastSecond = function(logArr) { // rate in the previous 5 seconds
+              var TIME_MEASURED = 5000,
+                  timePassed = Math.max((new Date().getTime() - startTime) / 1000, 1);
+
               // clean up older messages
-              while ((logArr.length > 0) && (logArr[0] < new Date().getTime() - 1000)) {
+              while ((logArr.length > 0) && (logArr[0] < new Date().getTime() - TIME_MEASURED)) {
                 logArr.shift();
               }
-              return logArr.length;
+              return Math.round(logArr.length / Math.min(TIME_MEASURED / 1000, timePassed));
             },
             attemptRateInLastSecond = function() {
               return rateInLastSecond(lastSecondAttemptRateLog);
             },
             connectionRateInLastSecond = function() {
               return rateInLastSecond(lastSecondConnectionRateLog);
+            },
+            misfiresInLastSecond = function() {
+              return rateInLastSecond(lastSecondMisfireLog);
             };
 
         return {
           recordAttempt: function() {
             lastSecondAttemptRateLog.push(new Date().getTime());
+            totalConnectionAttempts += 1;
           },
           recordSuccess: function() {
             messageLog.push(new Date().getTime());
@@ -156,12 +161,16 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
           recordError: function() {
             errorLog.push(new Date().getTime());
           },
+          recordMisfire: function() {
+            lastSecondMisfireLog.push(new Date().getTime());
+          },
           attemptRateInLastSecond: attemptRateInLastSecond,
           connectionRateInLastSecond: connectionRateInLastSecond,
+          misfiresInLastSecond: misfiresInLastSecond,
           errorsAveragedPerSecond: function() {
-            // get average number of errors per second since last performance logged or since start of test is less than performance logged interval
+            // get average number of errors per second since last performance logged or since start of test if less than performance logged interval
             var i, timePassed = (new Date().getTime() - startTime) / 1000, timeNow = new Date().getTime();
-            for (i = errorLog.length - 1; i--; (i >= 0) && (errorLog[i] >= timeNow - PERFORMANCE_LOGGING_INTERVAL * 1000) ) {}
+            for (i = errorLog.length - 1; (i >= 0) && (errorLog[i] >= timeNow - PERFORMANCE_LOGGING_INTERVAL * 1000); i--) {}
             if (errorLog.length) {
               return Math.round((errorLog.length - 1 - i) / Math.min(PERFORMANCE_LOGGING_INTERVAL, timePassed));
             } else {
@@ -171,17 +180,10 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
           totalErrors: function() {
             return errorLog.length;
           },
-          queueUntilRateDrops: function(callback) {
-            // put the item onto the queue
-            queue.push(callback);
-            if (queue.length === 1) { // first item in queue so activate timeout
-              whenRateDrops(processQueue, lastSecondAttemptRateLog);
-            }
-          },
           rateOverLastMinute: function() {
             // build a list of successful connections in the last minute
             var i, period = 60, lastMessageInMinute;
-            for (i = messageLog.length - 1; i--; messageLog[i] >= new Date().getTime() - period * 1000) {}
+            for (i = messageLog.length - 1; messageLog[i] >= new Date().getTime() - period * 1000; i--) {}
             lastMessageInMinute = messageLog[i+1];
             if (lastMessageInMinute) {
               return (messageLog.length - 1 - i) / ((new Date().getTime() - lastMessageInMinute) / 1000);
@@ -190,7 +192,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
             }
           }
         };
-      }(rate),
+      }(),
 
       dnsResolutionManager = function() {
         var IPsUsed = {},
@@ -203,7 +205,7 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
               dns.resolve4(host, function (err, addresses) {
                 if (err) {
                   if (!(host in IPsUsed)) {
-                    console.log("Warning, could not resolve DNS for " + lastRandomHost);
+                    console.log("Warning, could not resolve DNS for " + host);
                   }
                   addIP(host);
                 } else {
@@ -250,9 +252,29 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
         };
       }(),
 
+      // log current performance of test to the report array
+      // format: elapsed time(s),connections attempted,actual connections,messages attempted,messages actual
+      logPerformance = function(options) {
+        var secondsElapsed = Math.floor((new Date().getTime() - startTime) / 1000),
+            opts = (typeof options === 'object' ? options : {});
+        if (!opts.showExactSeconds) {
+          // make sure time is closest to the
+          secondsElapsed = Math.round(secondsElapsed / PERFORMANCE_LOGGING_INTERVAL) * PERFORMANCE_LOGGING_INTERVAL;
+        }
+        currentTestReport.push([
+          secondsElapsed,
+          attemptedConcurrentConnections,
+          concurrentConnections,
+          (currentRate() ? messageRateManager.attemptRateInLastSecond() : 'max'),
+          messageRateManager.connectionRateInLastSecond(),
+          messageRateManager.errorsAveragedPerSecond(),
+          messageRateManager.misfiresInLastSecond()
+        ]);
+      },
+
       loadTestComplete = function() {
         var timePassed = new Date().getTime() - startTime,
-            averageRate = totalConnectionRequests / (timePassed / 1000),
+            averageRate = totalConnectionsOpened / (timePassed / 1000),
             errorsPerMinute = Math.round(messageRateManager.totalErrors() / ((timePassed / 1000) / 60) * 1000) / 1000,
             IPs = [],
             ip,
@@ -260,9 +282,10 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
             i;
         console.log('\nFinished\n--------');
         report += 'Report for load test ' + loadTestRunning + ' complete';
-        report += '\n' + totalConnectionRequests + ' connections opened over ' + (Math.round(timePassed/100)/10) + ' seconds.  Average rate of ' + (Math.round(averageRate*10)/10) + ' transactions per second.';
+        report += '\n' + totalConnectionsOpened + ' connections opened over ' + (Math.round(timePassed/100)/10) + ' seconds.  Average rate of ' + (Math.round(averageRate*10)/10) + ' transactions per second.';
         report += '\nAverage rate over last minute of ' + (Math.round(messageRateManager.rateOverLastMinute() * 10) / 10) + ' transactions per second.';
         report += '\nLoad test errors ' + messageRateManager.totalErrors() + ', average errors per minute ' + (Math.round(errorsPerMinute * 10) / 10);
+        report += '\nAverage misfires (all connections used) in last 5 seconds ' + messageRateManager.misfiresInLastSecond();
         report += '\nIPs used: ' + dnsResolutionManager.getList() + '\n\n';
         report += 'Performance report for the duration of the tests:\n';
         if (currentTestReport.length < 2) {
@@ -281,41 +304,61 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
         }
       },
 
-      testTimeStillLeft = function() {
-        return endTime && (endTime > new Date().getTime());
+      testCanStillRun = function() {
+        if (endTime) {
+          return endTime > new Date().getTime();
+        } else {
+          return totalConnectionAttempts < Number(numberRequests);
+        }
+      },
+
+      testFinished = function() {
+        if (endTime) {
+          return (endTime < new Date().getTime()) && concurrentConnections <= 0;
+        } else {
+          return (totalConnectionAttempts >= Number(numberRequests)) && (concurrentConnections <= 0);
+        }
       },
 
       // open a new connection to the server
       openConnection = function() {
-        attemptedConcurrentConnections += 1;
-        messageRateManager.recordAttempt();
-
         var ws,
-            connectionTimeout,
-            closeAndOpen = function() {
-              attemptedConcurrentConnections -= 1;
+            connectionId = attemptedConcurrentConnections + 1,
+            connectionIsOpen = false,
+            attemptedConnectionClosed = false,
+            recordedEvent = false,
+            recordEvent = function(status) {
+              if (recordedEvent === false) {
+                recordedEvent = true;
+                if (status === 'success') {
+                  messageRateManager.recordSuccess();
+                } else {
+                  messageRateManager.recordError();
+                }
+              }
+            },
+            closeConnection = function() {
+              // close this connection no matter what to ensure we don't have memory or connection leaks
               try {
-                ws.close();
+                if (ws.readyState === OPEN) {
+                  ws.close();
+                }
               } catch(e) { }
 
-              if (!fireAwayIgnoringConnectionLimits) {
-                // we're not using fire & forget but recycling connections so we only open new connections when old ones are ready to be closed
-                // if using time && time has not run out
-                // or total requests less than expected requests (minus number of open connections)
-                // open another connection
-                if ( testTimeStillLeft() || (!endTime && (totalConnectionRequests < (numberRequests - attemptedConcurrentConnections))) ) {
-                  openConnection();
-                } else {
-                  if (attemptedConcurrentConnections <= 0) {
-                    if (loadTestRunning) { // only run once
-                      loadTestComplete();
-                    }
-                  }
-                }
-              } else {
-                // delay this by 1.5 seconds to ensure if message received back quickly the check to see if time is left will fail appropriately
+              // log connection closed if connection was opened
+              if (connectionIsOpen === true) {
+                concurrentConnections -= 1;
+                connectionIsOpen = false;
+              }
+
+              // ensure connection count for attempted connections is reduced only once and check for last test is run once
+              if (!attemptedConnectionClosed) {
+                attemptedConnectionClosed = true;
+                attemptedConcurrentConnections -= 1;
+                // check if the test is over and if so generate a report
+                // delay this check by 1.001 seconds to ensure if message received back quickly the check to see if time is left will fail because we may be in the second the test should run until
                 setTimeout(function() {
-                  if (!testTimeStillLeft()) {
+                  if (testFinished()) {
                     // we're running a fire & forget no concurrent connection limit process
                     // message sending initiated by setInterval so need to open new connections from here
                     if (attemptedConcurrentConnections <= 0) {
@@ -324,143 +367,97 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
                       }
                     }
                   }
-                }, 1500);
+                }, 1001);
               }
-            },
-            nextConnection = function() {
-              if (!nextConnectionOpened) {
-                clearTimeout(connectionTimeout);
-                nextConnectionOpened = true;
-                if (!fireAwayIgnoringConnectionLimits && currentRate() && (messageRateManager.attemptRateInLastSecond() >= currentRate())) {
-                  // ensure we don't exceed rate per second set
-                  messageRateManager.queueUntilRateDrops(closeAndOpen);
-                } else {
-                  closeAndOpen();
-                }
-              }
-            },
-            nextConnectionOpened = false,
-            connectionOpened = false;
+            };
 
-        try {
-          ws = new webSocket((noSsl ? 'ws' : 'wss') + '://' + dnsResolutionManager.randomIP() + ':' + port + '/');
+        messageRateManager.recordAttempt();
 
-          // on open connection, lets send a message to the server
-          ws.on('open', function() {
-            concurrentConnections += 1;
-            totalConnectionRequests += 1;
-            connectionOpened = true;
-            try {
-              ws.send('message');
-            } catch (e) {
-              concurrentConnections -= 1;
-              connectionOpened = false;
-              loadTestErrors += 1;
-              nextConnection();
-            }
-          });
-          ws.on('close', function() {
-            if (connectionOpened) {
-              concurrentConnections -= 1;
-              nextConnection(); // try open next connection in case message never received
-            }
-          });
-
-          // once we've successfully received a message, close the connection and open a new one if we have not exceeded the rate
-          ws.on('message', function(data, flags) {
-            messageRateManager.recordSuccess();
-            nextConnection();
-          });
-
-          ws.on('error', function() {
-            // close will fire afterwards
-            messageRateManager.recordError();
-            nextConnection();
-          });
-
-          connectionTimeout = setTimeout(function() {
-            messageRateManager.recordError();
-            nextConnection();
-          }, mustEchoMessageIn)
-        } catch (e) {
-          messageRateManager.recordError();
-          totalConnectionRequests += 1; // must log connection requests in case test is limited by connections
-          nextConnection();
-        }
-      },
-
-      connIndex, openConnectionInMs,
-
-      openRateControlledConnectionCallback = function() {
-        if (currentRate() && (messageRateManager.attemptRateInLastSecond() >= currentRate())) {
-          messageRateManager.queueUntilRateDrops(openConnection);
+        if (attemptedConcurrentConnections >= concurrent) {
+          messageRateManager.recordMisfire();
         } else {
-          openConnection();
-        }
-      },
+          attemptedConcurrentConnections += 1;
 
-      // log current performance of test to the report array
-      // format: elapsed time(s),connections attempted,actual connections,messages attempted,messages actual
-      logPerformance = function(options) {
-        var secondsElapsed = Math.floor((new Date().getTime() - startTime) / 1000),
-            opts = (typeof options === 'object' ? options : {});
-        if (!opts.showExactSeconds) {
-          // make sure time is closest to the
-          secondsElapsed = Math.round(secondsElapsed / PERFORMANCE_LOGGING_INTERVAL) * PERFORMANCE_LOGGING_INTERVAL;
-        }
-        currentTestReport.push([secondsElapsed, attemptedConcurrentConnections, concurrentConnections, (currentRate() ? messageRateManager.attemptRateInLastSecond() : 'max'), messageRateManager.connectionRateInLastSecond(), messageRateManager.errorsAveragedPerSecond()]);
-      },
+          try {
+            ws = new webSocket((noSsl ? 'ws' : 'wss') + '://' + dnsResolutionManager.randomIP() + ':' + port + '/');
 
-      intervals = [];
+            // on open connection, lets send a message to the server
+            ws.on('open', function() {
+              if (connectionIsOpen === false) { // ensure we never double count a connection open
+                connectionIsOpen = true;
+                concurrentConnections += 1;
+                totalConnectionsOpened += 1;
+              }
+              try {
+                ws.send('message');
+              } catch (e) {
+                console.dir(e);
+                recordEvent('error');
+                closeConnection();
+              }
+            });
 
-  console.log("Starting load testing for host " + hosts.join(',') + ":" + port + ' with a timeout of ' + (mustEchoMessageIn/1000) + 's');
-  if (endTime) {
-    console.log("Running for " + duration + " seconds");
-  }
-  if (concurrent) {
-    console.log("Set to use " + concurrent + " concurrent connections");
-  } else {
-    if (!rate && duration) {
-      errorResponse = 'Cannot run test with an unlimited number of concurrent connections without a max rate or using a time based test (as opposed to specifying a number of requests)';
-      console.log('!!! Error: ' + errorResponse);
-      return errorResponse;
-    } else {
-      console.log("Set to use unlimited connections");
-    }
-  }
-  console.log("Using SSL: " + (noSsl ? 'No' : 'Yes'));
+            ws.on('close', function() {
+              closeConnection();
+            });
 
-  dnsResolutionManager.resolveDns(function() {
-    if (!concurrent && !duration) {
-      // no concurrent connection limit and just a number of max requests specified so lets open them all up now (rate limited still)
-      for (connIndex = 0; connIndex < numberRequests; connIndex++) {
-        openRateControlledConnectionCallback();
-      }
-    } else if (fireAwayIgnoringConnectionLimits) {
-      // no concurrent connection limit, so just open a new connection whenever we need to fire a message
-      fireAndForgetFn = function() {
-        if (testTimeStillLeft()) {
-          if (messageRateManager.attemptRateInLastSecond() < currentRate()) {
-            openConnection();
-            setTimeout(fireAndForgetFn, 0);
-          } else {
-            setTimeout(fireAndForgetFn, 100);
+            // once we've successfully received a message, close the connection and open a new one if we have not exceeded the rate
+            ws.on('message', function(data, flags) {
+              recordEvent('success');
+              closeConnection();
+            });
+
+            ws.on('error', function(e) {
+              // close will fire afterwards
+              recordEvent('error');
+              closeConnection();
+            });
+          } catch (e) {
+            recordEvent('error');
+            totalConnectionsOpened += 1; // must log connection requests in case test is limited by connections
+            closeConnection();
           }
         }
       };
-      fireAndForgetFn();
-    } else {
-      // concurrent connections set so we'll fire new requests when connections become available
-      // open up the connections
-      for (connIndex = 0; connIndex < concurrent; connIndex++) {
-        openConnectionInMs = rampUpTime ? Math.floor( (connIndex / concurrent) * rampUpTime) * 1000: 0;
-        setTimeout(openRateControlledConnectionCallback, openConnectionInMs);
-      }
-    }
 
+  // quick summary of load test outputted to the console
+  console.log("Starting load testing for host " + hosts.join(',') + ":" + port);
+  if (endTime) {
+    console.log("Running for " + duration + " seconds");
+  } else {
+    console.log("Will fire " + numberRequests + " requests in this test");
+  }
+  console.log("Set to use max " + concurrent + " concurrent connections");
+  if (rate) { console.log("Max rate set to " + rate + " p/s" + (rampUpTime ? ' with a ramp up time of ' + rampUpTime + 's' : '')); }
+  console.log("Using SSL: " + (noSsl ? 'No' : 'Yes'));
+
+  // resolve DNS and then lets start the test
+  dnsResolutionManager.resolveDns(function() {
+    // fire connection requests as necessary, either limited by rate or until testCanStillRun specifies it should stop (time or quantity based)
+    var fireAwayFn = function() {
+      var requestSent = false;
+      if (testCanStillRun()) {
+        if (currentRate()) {
+          // test is rate limited, so open a connection if within rate threshold
+          if (messageRateManager.attemptRateInLastSecond() < currentRate()) {
+            requestSent = true;
+            openConnection();
+          }
+        } else {
+          // just fire away
+          requestSent = true;
+          openConnection();
+        }
+        // call this test again immediately if request sent, else wait a bit until a slot frees up
+        setTimeout(fireAwayFn, requestSent ? 0 : 100);
+      }
+    };
+    fireAwayFn();
+
+    // console status updates
     intervals.push(setInterval(function() {
       if (loadTestRunning) {
-        console.log(' - attempted conns: ' + attemptedConcurrentConnections + ', conns: ' + concurrentConnections + ', message attempts p/s: ' + messageRateManager.attemptRateInLastSecond() + ', messages p/s: ' + messageRateManager.connectionRateInLastSecond() + ', total messages: ' + totalConnectionRequests + ', total errors: ' + messageRateManager.totalErrors());
+        console.log(' - attempted conns: ' + attemptedConcurrentConnections + ', conns: ' + concurrentConnections + ', message attempts p/s: ' + messageRateManager.attemptRateInLastSecond() + ', messages p/s: ' + messageRateManager.connectionRateInLastSecond() + ', misfires p/s: ' + messageRateManager.misfiresInLastSecond() + ', total messages: ' + totalConnectionsOpened + ', total errors: ' + messageRateManager.totalErrors());
       }
     }, Math.min(duration ? duration / 20 : 20, 20) * 1000)); // 20 updates or at least one every 20 seconds
 
@@ -474,8 +471,6 @@ var loadTestClient = function(hostList, port, concurrent, numberRequests, rampUp
     // log the attempted performance and actual performance every PERFORMANCE_LOGGING_INTERVAL seconds
     intervals.push(setInterval(logPerformance, PERFORMANCE_LOGGING_INTERVAL * 1000));
   });
-
-  return errorResponse;
 };
 
 console.log('Ready and listening on port ' + serverPort);
